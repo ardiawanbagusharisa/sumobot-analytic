@@ -1,10 +1,11 @@
 import os
 import re
 import json
-import csv
+import polars as pl
 from glob import glob
 import shutil
-from tqdm import tqdm  # optional: pip install tqdm
+from tqdm import tqdm
+
 
 def extract_game_index(filename: str) -> int:
     """Extract numeric index from filename like 'game_001.json'."""
@@ -12,48 +13,41 @@ def extract_game_index(filename: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-def escape_csv(value: str) -> str:
-    """Escape CSV fields like C# version."""
-    if any(c in value for c in [',', '"', '\n']):
-        return '"' + value.replace('"', '""') + '"'
-    return value
-
-
-def safe_int(value, default="") -> str:
-    """Convert to int string, return default if None/empty."""
+def safe_int(value, default=None):
+    """Convert to int, return default if None/empty."""
     if value is None or value == "":
         return default
     try:
-        return str(int(value))
+        return int(value)
     except (ValueError, TypeError):
         return default
 
 
-def safe_float(value, default="") -> str:
-    """Convert to float string with consistent precision, return default if None/empty."""
+def safe_float(value, default=None):
+    """Convert to float, return default if None/empty."""
     if value is None or value == "":
         return default
     try:
-        return f"{float(value):.10g}"  # Use general format, up to 10 significant digits
+        return float(value)
     except (ValueError, TypeError):
         return default
 
 
-def safe_bool(value) -> str:
-    """Convert boolean to '1' or '0'."""
-    return "1" if value else "0"
+def safe_bool(value) -> int:
+    """Convert boolean to 1 or 0 (as int to match CSV format)."""
+    return 1 if value else 0
 
 
-def safe_str(value, default="") -> str:
+def safe_str(value, default=None):
     """Convert to string, handling None."""
     if value is None or value == "":
         return default
     return str(value)
 
 
-def convert_logs_to_csv(folder_path: str, output_path: str):
-    """Convert all game_*.json files in folder to one CSV."""
-    csv_rows = []
+def convert_logs_to_parquet(folder_path: str, output_path: str):
+    """Convert all game_*.json files in folder to one Parquet file."""
+    rows = []
 
     files = sorted(
         glob(os.path.join(folder_path, "game_*.json")),
@@ -81,18 +75,18 @@ def convert_logs_to_csv(folder_path: str, output_path: str):
 
                 row = {
                     "GameIndex": safe_int(game_index + 1),
-                    "GameWinner": "2" if game_winner == "Draw" else "0" if game_winner == "Left" else "1",
+                    "GameWinner": 2 if game_winner == "Draw" else 0 if game_winner == "Left" else 1,
                     "GameTimestamp": safe_str(game_timestamp),
                     "RoundIndex": safe_int(round_index),
-                    "RoundWinner": "2" if round_winner == "Draw" else "0" if round_winner == "Left" else "1",
+                    "RoundWinner": 2 if round_winner == "Draw" else 0 if round_winner == "Left" else 1,
                     "RoundTimestamp": safe_str(round_timestamp),
                     "StartedAt": safe_float(event_log.get("StartedAt")),
                     "UpdatedAt": safe_float(event_log.get("UpdatedAt")),
-                    "Actor": "0" if event_log.get("Actor") == "Left" else "1",
+                    "Actor": 0 if event_log.get("Actor") == "Left" else 1,
                 }
 
                 target = event_log.get("Target", "")
-                row["Target"] = "" if target == "" else "0" if target == "Left" else "1"
+                row["Target"] = None if target == "" else 0 if target == "Left" else 1
                 row["Category"] = safe_str(event_log.get("Category"))
                 row["State"] = safe_str(event_log.get("State"))
 
@@ -101,7 +95,7 @@ def convert_logs_to_csv(folder_path: str, output_path: str):
                     row["Name"] = safe_str(act.get("Name"))
                     row["Duration"] = safe_float(act.get("Duration"))
                     reason = act.get("Reason")
-                    row["Reason"] = "" if reason is None or str(reason) == "None" else safe_str(reason)
+                    row["Reason"] = None if reason is None or str(reason) == "None" else safe_str(reason)
 
                     robot = act.get("Robot")
                     if robot:
@@ -166,33 +160,105 @@ def convert_logs_to_csv(folder_path: str, output_path: str):
                             "ColEnemyBotIsOutFromArena": safe_bool(col_enemy.get("IsOutFromArena")),
                         })
 
-                csv_rows.append(row)
+                rows.append(row)
 
-    # Collect all CSV columns
+    # Define preferred column order and schema
     preferred_order = [
-        "GameIndex","GameWinner","GameTimestamp","RoundIndex","RoundWinner","RoundTimestamp","StartedAt","UpdatedAt","Actor","Target","Category","State","Name","Duration","Reason","BotPosX","BotPosY","BotLinv","BotAngv","BotRot","BotIsDashActive","BotIsSkillActive","BotIsOutFromArena","EnemyBotPosX","EnemyBotPosY","EnemyBotLinv","EnemyBotAngv","EnemyBotRot","EnemyBotIsDashActive","EnemyBotIsSkillActive","EnemyBotIsOutFromArena","ColActor","ColImpact","ColTieBreaker","ColLockDuration","ColBotPosX","ColBotPosY","ColBotLinv","ColBotAngv","ColBotRot","ColBotIsDashActive","ColBotIsSkillActive","ColBotIsOutFromArena","ColEnemyBotPosX","ColEnemyBotPosY","ColEnemyBotLinv","ColEnemyBotAngv","ColEnemyBotRot","ColEnemyBotIsDashActive","ColEnemyBotIsSkillActive","ColEnemyBotIsOutFromArena"
+        "GameIndex", "GameWinner", "GameTimestamp", "RoundIndex", "RoundWinner", "RoundTimestamp",
+        "StartedAt", "UpdatedAt", "Actor", "Target", "Category", "State", "Name", "Duration", "Reason",
+        "BotPosX", "BotPosY", "BotLinv", "BotAngv", "BotRot", "BotIsDashActive", "BotIsSkillActive", "BotIsOutFromArena",
+        "EnemyBotPosX", "EnemyBotPosY", "EnemyBotLinv", "EnemyBotAngv", "EnemyBotRot",
+        "EnemyBotIsDashActive", "EnemyBotIsSkillActive", "EnemyBotIsOutFromArena",
+        "ColActor", "ColImpact", "ColTieBreaker", "ColLockDuration",
+        "ColBotPosX", "ColBotPosY", "ColBotLinv", "ColBotAngv", "ColBotRot",
+        "ColBotIsDashActive", "ColBotIsSkillActive", "ColBotIsOutFromArena",
+        "ColEnemyBotPosX", "ColEnemyBotPosY", "ColEnemyBotLinv", "ColEnemyBotAngv", "ColEnemyBotRot",
+        "ColEnemyBotIsDashActive", "ColEnemyBotIsSkillActive", "ColEnemyBotIsOutFromArena"
     ]
-    # Merge preferred order with dynamically discovered keys
-    all_keys = preferred_order + [k for k in {kk for d in csv_rows for kk in d.keys()} if k not in preferred_order]
 
+    # Define explicit schema to avoid type conflicts
+    # Note: Using Int64 for boolean-like fields to match CSV behavior and ensure compatibility
+    schema = {
+        "GameIndex": pl.Int64,
+        "GameWinner": pl.Int64,
+        "GameTimestamp": pl.Utf8,
+        "RoundIndex": pl.Int64,
+        "RoundWinner": pl.Int64,
+        "RoundTimestamp": pl.Utf8,
+        "StartedAt": pl.Float64,
+        "UpdatedAt": pl.Float64,
+        "Actor": pl.Int64,
+        "Target": pl.Int64,
+        "Category": pl.Utf8,
+        "State": pl.Utf8,  # Keep as string to match CSV format
+        "Name": pl.Utf8,
+        "Duration": pl.Float64,
+        "Reason": pl.Utf8,
+        "BotPosX": pl.Float64,
+        "BotPosY": pl.Float64,
+        "BotLinv": pl.Float64,
+        "BotAngv": pl.Float64,
+        "BotRot": pl.Float64,
+        "BotIsDashActive": pl.Int64,  # Store as 0/1 to match CSV format
+        "BotIsSkillActive": pl.Int64,
+        "BotIsOutFromArena": pl.Int64,
+        "EnemyBotPosX": pl.Float64,
+        "EnemyBotPosY": pl.Float64,
+        "EnemyBotLinv": pl.Float64,
+        "EnemyBotAngv": pl.Float64,
+        "EnemyBotRot": pl.Float64,
+        "EnemyBotIsDashActive": pl.Int64,
+        "EnemyBotIsSkillActive": pl.Int64,
+        "EnemyBotIsOutFromArena": pl.Int64,
+        "ColActor": pl.Int64,
+        "ColImpact": pl.Float64,
+        "ColTieBreaker": pl.Int64,
+        "ColLockDuration": pl.Float64,
+        "ColBotPosX": pl.Float64,
+        "ColBotPosY": pl.Float64,
+        "ColBotLinv": pl.Float64,
+        "ColBotAngv": pl.Float64,
+        "ColBotRot": pl.Float64,
+        "ColBotIsDashActive": pl.Int64,
+        "ColBotIsSkillActive": pl.Int64,
+        "ColBotIsOutFromArena": pl.Int64,
+        "ColEnemyBotPosX": pl.Float64,
+        "ColEnemyBotPosY": pl.Float64,
+        "ColEnemyBotLinv": pl.Float64,
+        "ColEnemyBotAngv": pl.Float64,
+        "ColEnemyBotRot": pl.Float64,
+        "ColEnemyBotIsDashActive": pl.Int64,
+        "ColEnemyBotIsSkillActive": pl.Int64,
+        "ColEnemyBotIsOutFromArena": pl.Int64,
+    }
 
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(all_keys)
-        for row in csv_rows:
-            writer.writerow([row.get(k, "") for k in all_keys])
+    # Normalize rows to ensure all have the same columns
+    for row in rows:
+        for col in preferred_order:
+            if col not in row:
+                # Set default None for all missing columns
+                row[col] = None
 
-    print(f"✅ Saved CSV: {output_path}")
+    # Create polars DataFrame with explicit schema
+    df = pl.DataFrame(rows, schema=schema, infer_schema_length=0)
+
+    # Select columns in preferred order
+    df = df.select(preferred_order)
+
+    # Write to parquet with zstd compression (better compression than snappy, similar speed)
+    # ZSTD provides ~2-3x better compression than Snappy with minimal speed penalty
+    df.write_parquet(output_path, compression="zstd", compression_level=3)
+    print(f"✅ Saved Parquet: {output_path}")
 
 
 def convert_all_configs(simulation_root: str, output_root: str):
-    """Convert all config folders recursively (Timer_*)."""
+    """Convert all config folders recursively (Timer_*) to Parquet files."""
     config_folders = []
     for root, dirs, _ in os.walk(simulation_root):
         for d in dirs:
             if d.startswith("Timer_"):
                 config_folders.append(os.path.join(root, d))
-    
+
     for i, config_folder in enumerate(config_folders, 1):
         config_name = os.path.basename(config_folder)
         parent_name = os.path.basename(os.path.dirname(config_folder))
@@ -200,68 +266,31 @@ def convert_all_configs(simulation_root: str, output_root: str):
         print(f"DEBUG: config_folder = {config_folder}")
         print(f"DEBUG: parent_name = {parent_name}")
         print(f"DEBUG: config_name = {config_name}")
-        
+
         # Create output folder with parent structure if it doesn't exist
         output_folder = os.path.join(output_root, parent_name, config_name)
         os.makedirs(output_folder, exist_ok=True)
-        
-        output_path = os.path.join(output_folder, f"{config_name}.csv")
-        
+
+        output_path = os.path.join(output_folder, f"{config_name}.parquet")
+
         if os.path.isfile(output_path):
             print(f"[{i}/{len(config_folders)}] Skipped {config_name} already exists")
             continue
-        
-        # Check if CSV exists in original location, move it instead of regenerating
-        old_csv_path = os.path.join(config_folder, f"{config_name}.csv")
-        if os.path.isfile(old_csv_path):
-            shutil.move(old_csv_path, output_path)
+
+        # Check if Parquet exists in original location, move it instead of regenerating
+        old_parquet_path = os.path.join(config_folder, f"{config_name}.parquet")
+        if os.path.isfile(old_parquet_path):
+            shutil.move(old_parquet_path, output_path)
             print(f"[{i}/{len(config_folders)}] Moved {config_name} to output folder")
             continue
-        
+
         print(f"[{i}/{len(config_folders)}] Processing {config_name}")
-        convert_logs_to_csv(config_folder, output_path)
-        config_name = os.path.basename(config_folder)
-        
-        # Create output folder if it doesn't exist
-        output_folder = os.path.join(output_root, parent_name,config_name)
-        os.makedirs(output_folder, exist_ok=True)
-        
-        output_path = os.path.join(output_folder, f"{config_name}.csv")
-        
-        if os.path.isfile(output_path):
-            print(f"[{i}/{len(config_folders)}] Skipped {config_name} already exists")
-            continue
-        
-        # Check if CSV exists in original location, move it instead of regenerating
-        old_csv_path = os.path.join(config_folder, f"{config_name}.csv")
-        if os.path.isfile(old_csv_path):
-            shutil.move(old_csv_path, output_path)
-            print(f"[{i}/{len(config_folders)}] Moved {config_name} to output folder")
-            continue
-        
-        print(f"[{i}/{len(config_folders)}] Processing {config_name}")
-        convert_logs_to_csv(config_folder, output_path)
+        convert_logs_to_parquet(config_folder, output_path)
 
 
 if __name__ == "__main__":
     # Example usage:
-    # incompletes = [
-    #     ["Bot_GA_vs_Bot_Primitive","Timer_60__ActInterval_0.1__Round_BestOf5__SkillLeft_Boost__SkillRight_Boost"],
-    #     ["Bot_FSM_vs_Bot_Primitive","Timer_15__ActInterval_0.1__Round_BestOf3__SkillLeft_Boost__SkillRight_Boost"],
-    #     ["Bot_BT_vs_Bot_UtilityAI","Timer_45__ActInterval_0.1__Round_BestOf5__SkillLeft_Stone__SkillRight_Stone"],
-    #     ["Bot_UtilityAI_vs_Bot_FSM","Timer_15__ActInterval_0.1__Round_BestOf5__SkillLeft_Boost__SkillRight_Stone"]
-    # ]
     simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Simulation"
-    # output_root = "C:/Simulation_CSV"
-    # for inc in incompletes:
-    #     name = inc[1]
-    #     specific_folder = os.path.join(
-    #         simulation_root,
-    #         inc[0],
-    #         name,
-    #     )
-    #     convert_logs_to_csv(specific_folder, os.path.join(specific_folder, f"{name}.csv"))
 
-
-    # OR convert all configs:
-    convert_all_configs(simulation_root,simulation_root)
+    # Convert all configs to parquet
+    convert_all_configs(simulation_root, simulation_root)

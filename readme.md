@@ -66,8 +66,8 @@ The main analysis is performed in **`analysis.ipynb`**, which is divided into th
 Set up directory paths for input simulation logs and output files:
 
 ```python
-simulation_root = "/Users/defdef/Library/Application Support/DefaultCompany/Sumobot/Simulation"
-csv_folder = "/Users/defdef/Documents/Simulation"
+simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Simulation"
+csv_folder = "/Users/user_name/Documents/Simulation"
 ```
 
 ### 2. Data Compilation

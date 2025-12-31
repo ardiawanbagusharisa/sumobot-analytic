@@ -1,6 +1,7 @@
 """
 Polars GPU-accelerated generator with batch processing
-Uses scan_csv for lazy evaluation and GPU acceleration
+Supports both CSV and Parquet input formats
+Uses scan_csv/scan_parquet for lazy evaluation and GPU acceleration
 Aggregation logic from generator_duckdb_polars.py
 Batch processing pattern from generator.py
 """
@@ -57,6 +58,24 @@ def parse_config_name(config_name: str):
     return config
 
 
+def scan_file(file_path):
+    """
+    Scan a file (CSV or Parquet) and return a LazyFrame
+
+    Args:
+        file_path: Path to CSV or Parquet file
+
+    Returns:
+        Polars LazyFrame
+    """
+    if file_path.endswith('.parquet'):
+        return pl.scan_parquet(file_path)
+    elif file_path.endswith('.csv'):
+        return pl.scan_csv(file_path, infer_schema_length=10000)
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}. Only .csv and .parquet are supported.")
+
+
 def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=None, compute_timebins=False):
     """
     Process a batch of CSV files and create checkpoint
@@ -91,9 +110,8 @@ def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=
         # Parse config
         config = parse_config_name_cached(config_folder)
 
-        # Scan CSV with Polars lazy API
-        # Specify schema to ensure numeric columns are read correctly
-        lf = pl.scan_csv(csv_path, infer_schema_length=10000)
+        # Scan file (CSV or Parquet) with Polars lazy API
+        lf = scan_file(csv_path)
 
         # Process game metrics
         game_metrics_lf = process_single_csv_lazy(
@@ -211,8 +229,9 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
     Returns list of time-binned collision records
     """
     # Scan and filter for collisions
+    # Cast State to string for consistent comparison (handles both CSV strings and Parquet types)
     raw_data = lf.filter(
-        (pl.col("Category") == "Collision") & (pl.col("State") == 0)
+        (pl.col("Category") == "Collision") & (pl.col("State").cast(pl.Utf8) == "0")
     ).select([
         "GameIndex", "Actor", "ColTieBreaker", "ColActor", "UpdatedAt"
     ])
@@ -382,18 +401,19 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
-def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False):
+def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, input_format="csv"):
     """
-    Process CSVs in batches and save checkpoints
+    Process CSVs or Parquet files in batches and save checkpoints
     Similar to generator.py batch() function
-    Structure: base_dir/BotA_vs_BotB/ConfigFolder/*.csv
+    Structure: base_dir/BotA_vs_BotB/ConfigFolder/*.csv or *.parquet
 
     Args:
         base_dir: Base directory containing simulation data
-        batch_size: Number of CSV files per batch
+        batch_size: Number of files per batch
         checkpoint_dir: Directory to save checkpoints
         time_bin_size: Size of time bins (only used if compute_timebins=True)
         compute_timebins: Whether to compute time-binned data
+        input_format: "csv", "parquet", or "auto" to detect both
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -404,8 +424,8 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
         os.makedirs(action_timebin_dir, exist_ok=True)
         os.makedirs(collision_timebin_dir, exist_ok=True)
 
-    # Find all CSV files grouped by matchup/config
-    all_csvs = []
+    # Find all data files grouped by matchup/config
+    all_files = []
     matchup_folders = [f for f in os.listdir(base_dir)
                        if os.path.isdir(os.path.join(base_dir, f))]
 
@@ -416,10 +436,21 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
 
         for config_folder in config_folders:
             config_path = os.path.join(matchup_path, config_folder)
-            csv_files = glob.glob(os.path.join(config_path, "*.csv"))
-            all_csvs.extend(csv_files)
 
-    print(f"Found {len(all_csvs)} CSV files to process")
+            # Collect files based on input format
+            if input_format == "csv":
+                files = glob.glob(os.path.join(config_path, "*.csv"))
+            elif input_format == "parquet":
+                files = glob.glob(os.path.join(config_path, "*.parquet"))
+            else:  # auto - prefer parquet, fallback to csv
+                parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
+                csv_files = glob.glob(os.path.join(config_path, "*.csv"))
+                files = parquet_files if parquet_files else csv_files
+
+            all_files.extend(files)
+
+    file_type = "Parquet" if input_format == "parquet" else "CSV/Parquet" if input_format == "auto" else "CSV"
+    print(f"Found {len(all_files)} {file_type} files to process")
 
     # Determine which batches are already processed
     processed_batches = set()
@@ -429,7 +460,7 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
             processed_batches.add(int(match.group(1)))
 
     # Process in batches
-    total_batches = (len(all_csvs) + batch_size - 1) // batch_size
+    total_batches = (len(all_files) + batch_size - 1) // batch_size
 
     for batch_idx in range(total_batches):
         batch_num = batch_idx + 1
@@ -440,13 +471,13 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
             continue
 
         start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(all_csvs))
-        batch_csvs = all_csvs[start_idx:end_idx]
+        end_idx = min(start_idx + batch_size, len(all_files))
+        batch_files = all_files[start_idx:end_idx]
 
-        print(f"\nProcessing batch {batch_num}/{total_batches} ({len(batch_csvs)} files)...")
+        print(f"\nProcessing batch {batch_num}/{total_batches} ({len(batch_files)} files)...")
 
         batch_df, action_timebin_df, collision_timebin_df = process_batch_csvs(
-            batch_csvs, checkpoint_dir, time_bin_size=time_bin_size, compute_timebins=compute_timebins
+            batch_files, checkpoint_dir, time_bin_size=time_bin_size, compute_timebins=compute_timebins
         )
 
         # Save game metrics batch
@@ -633,7 +664,7 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir):
     action_batch_files = sorted(glob.glob(f"{checkpoint_dir}/action_timebins/batch_*.csv"))
     if action_batch_files:
         print(f"\n📂 Loading {len(action_batch_files)} action timebin batch files...")
-        action_lazy_frames = [pl.scan_csv(f) for f in action_batch_files]
+        action_lazy_frames = [scan_file(f) for f in action_batch_files]
         action_timebin_df = collect_with_gpu(pl.concat(action_lazy_frames))
         print(f"Loaded {len(action_timebin_df):,} action timebin records")
 
@@ -644,7 +675,7 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir):
     collision_batch_files = sorted(glob.glob(f"{checkpoint_dir}/collision_timebins/batch_*.csv"))
     if collision_batch_files:
         print(f"\n📂 Loading {len(collision_batch_files)} collision timebin batch files...")
-        collision_lazy_frames = [pl.scan_csv(f) for f in collision_batch_files]
+        collision_lazy_frames = [scan_file(f) for f in collision_batch_files]
         collision_timebin_df = collect_with_gpu(pl.concat(collision_lazy_frames))
         print(f"Loaded {len(collision_timebin_df):,} collision timebin records")
 
@@ -692,9 +723,9 @@ def compute_collision_time_bins_from_csvs(base_dir, time_bin_size=5):
         config = parse_config_name_cached(config_folder)
 
         # Scan and filter for collisions
-        lf = pl.scan_csv(csv_path)
+        lf = scan_file(csv_path)
         raw_data = lf.filter(
-            (pl.col("Category") == "Collision") & (pl.col("State") == 0)
+            (pl.col("Category") == "Collision") & (pl.col("State").cast(pl.Utf8) == "0")
         ).select([
             "GameIndex", "Actor", "ColTieBreaker", "ColActor", "UpdatedAt"
         ])
@@ -822,7 +853,7 @@ def generate(checkpoint_dir, output_dir):
     print(f"\n📂 Loading {len(batch_files)} batch files...")
 
     # Scan and concatenate all batches using lazy API
-    lazy_frames = [pl.scan_csv(f) for f in batch_files]
+    lazy_frames = [scan_file(f) for f in batch_files]
     all_games_lazy = pl.concat(lazy_frames)
 
     print("🔄 Collecting all games...")
@@ -849,7 +880,7 @@ def generate(checkpoint_dir, output_dir):
 if __name__ == "__main__":
     import sys
 
-    base_dir = "/Users/defdef/Documents/Simulation"
+    base_dir = "/Users/user_name/Documents/Simulation"
     checkpoint_dir = "batched"
     output_dir = "result"
     timebin_size = 5

@@ -40,19 +40,36 @@ arena_radius = 4.73485
 tile_size = 0.7   # Larger = bigger heatmap tiles (lower resolution)
 # arrow_size = 50   # Larger = longer arrows
 
-def load_data_chunked(csv_path, chunksize=50000, actor_filter=None):
+def scan_data_file(file_path):
     """
-    Load CSV data using Polars with GPU acceleration and streaming
+    Scan a data file (CSV or Parquet) and return a LazyFrame
 
     Args:
-        csv_path: Path to CSV file
+        file_path: Path to CSV or Parquet file
+
+    Returns:
+        Polars LazyFrame
+    """
+    if file_path.endswith('.parquet'):
+        return pl.scan_parquet(file_path)
+    elif file_path.endswith('.csv'):
+        return pl.scan_csv(file_path, ignore_errors=True, rechunk=False)
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}. Only .csv and .parquet are supported.")
+
+def load_data_chunked(csv_path, chunksize=50000, actor_filter=None):
+    """
+    Load CSV or Parquet data using Polars with GPU acceleration and streaming
+
+    Args:
+        csv_path: Path to CSV or Parquet file
         chunksize: Number of rows per chunk (ignored for Polars, kept for API compatibility)
         actor_filter: Filter for specific actor (0 for left, 1 for right, None for both)
     """
-    # Scan CSV without schema enforcement - let Polars infer naturally
-    # Use ignore_errors to handle inconsistent column types across files
+    # Scan file (CSV or Parquet) without schema enforcement
+    # Use ignore_errors for CSV to handle inconsistent column types across files
     # rechunk=False reduces memory overhead by avoiding unnecessary rechunking
-    lf = pl.scan_csv(csv_path, ignore_errors=True, rechunk=False)
+    lf = scan_data_file(csv_path)
 
     # Select ONLY required columns to drastically reduce memory usage
     # This is critical for 135GB files - we only load what we need
@@ -454,13 +471,13 @@ def extract_timer_from_config(config_folder):
 
 def load_bot_data_from_simulation(base_dir, bot_name, actor_position="left", chunksize=50000, max_configs=None, group_by_timer=False, also_load_distance=False):
     """
-    Load all CSV data for a specific bot from the simulation directory
+    Load all CSV or Parquet data for a specific bot from the simulation directory
 
     Args:
         base_dir: Base simulation directory
         bot_name: Name of the bot (e.g., "Bot_BT", "Bot_NN", "Bot_Primitive")
         actor_position: "left" (Actor 0) or "right" (Actor 1) or "both"
-        chunksize: Chunk size for reading CSV files
+        chunksize: Chunk size for reading files (ignored for Parquet)
         max_configs: Maximum number of config folders to process (None for all)
         group_by_timer: If True, return dict of {timer_value: DataFrame}, else return combined DataFrame
         also_load_distance: If True, also return timer-grouped distance data
@@ -468,6 +485,9 @@ def load_bot_data_from_simulation(base_dir, bot_name, actor_position="left", chu
     Returns:
         Combined DataFrame with all bot data, or dict of DataFrames grouped by Timer
         If also_load_distance=True, returns tuple: (bot_data, distance_data)
+
+    Note:
+        Prefers Parquet files over CSV if both exist in the config folder
     """
     all_data = []
     timer_grouped_data = {}  # {timer_value: [dataframes]}
@@ -518,17 +538,19 @@ def load_bot_data_from_simulation(base_dir, bot_name, actor_position="left", chu
         for config_folder in tqdm(config_folders, desc=f"  Loading {matchup_folder}", leave=False):
             config_path = os.path.join(matchup_path, config_folder)
 
-            # Find CSV file in this config folder
+            # Find data file (prefer Parquet, fallback to CSV) in this config folder
+            parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
             csv_files = glob.glob(os.path.join(config_path, "*.csv"))
+            data_files = parquet_files if parquet_files else csv_files
 
-            if csv_files:
-                csv_path = csv_files[0]  # Should only be 1 CSV per config
-                df = load_data_chunked(csv_path, chunksize, actor_filter=actor_filter)
+            if data_files:
+                data_path = data_files[0]  # Should only be 1 file per config
+                df = load_data_chunked(data_path, chunksize, actor_filter=actor_filter)
 
                 if not df.is_empty():
                     # Also load distance data if requested
                     if also_load_distance:
-                        df_all_actors = load_data_chunked(csv_path, chunksize, actor_filter=None)
+                        df_all_actors = load_data_chunked(data_path, chunksize, actor_filter=None)
                         if not df_all_actors.is_empty():
                             dist_df = calculate_distance_between_bots(df_all_actors)
                             if not dist_df.is_empty():
@@ -1898,7 +1920,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
 
 if __name__ == "__main__":
-    default_base_dir = "/Users/defdef/Library/Application Support/DefaultCompany/Sumobot/Simulation"
+    default_base_dir = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Simulation"
     parser = argparse.ArgumentParser(
         description="Create phased heatmap visualizations for sumobot arena data",
         formatter_class=argparse.RawDescriptionHelpFormatter,
