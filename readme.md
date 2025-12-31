@@ -2,8 +2,6 @@
 
 A comprehensive data analysis toolkit for analyzing SumoBot gameplay performance across multiple configurations. This project processes simulation logs, generates statistical summaries, and provides rich visualizations through Jupyter notebooks and an interactive Streamlit dashboard.
 
-Live dashboard: https://sumo.orpheus.my.id
-
 ## Table of Contents
 - [Overview](#overview)
 - [Installation](#installation)
