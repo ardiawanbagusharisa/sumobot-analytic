@@ -47,7 +47,7 @@ Required packages:
 1. **Configure paths** in `analysis.ipynb`:
    ```python
    simulation_root = "/path/to/Simulation"  # Unity simulation logs
-   csv_folder = "/path/to/CSV_output"       # Converted CSV files
+   converted_dir = "converted"              # Converted Parquet/CSV files
    ```
 
 2. **Run the analysis notebook**:
@@ -66,43 +66,59 @@ The main analysis is performed in **`analysis.ipynb`**, which is divided into th
 Set up directory paths for input simulation logs and output files:
 
 ```python
-simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Simulation"
-csv_folder = "/Users/user_name/Documents/Simulation"
+simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
+converted_dir = "converted"
+summarized_dir = "result"
+batch_checkpoint_dir = "batched"
+arena_heatmaps_output = "result/arena_heatmaps"
 ```
 
 ### 2. Data Compilation
 
-#### Step 2.1: Convert Simulation Logs to CSV
+#### Step 2.1: Convert Simulation Logs to Parquet / CSV
 
-Convert Unity simulation logs to structured CSV format:
+Convert Unity simulation logs to structured Parquet or CSV format. **Parquet is recommended** for better performance and smaller file sizes:
 
+**Using Parquet (Recommended):**
 ```python
-from compile.log_to_csv import convert_all_configs
-convert_all_configs(simulation_root, csv_folder)
+from compile.log_to_parquet import convert_all_configs
+convert_all_configs(simulation_root, converted_dir)
 ```
 
-This processes all configuration folders and generates CSV files organized by matchup.
+**Using CSV:**
+```python
+from compile.log_to_csv import convert_all_configs
+convert_all_configs(simulation_root, converted_dir)
+```
+
+This processes all configuration folders and generates Parquet/CSV files organized by matchup.
 
 #### Step 2.2: Generate Summarization CSV
 
-Process CSV files in batches to create summary statistics:
+Process Parquet/CSV files in batches to create summary statistics. The system automatically detects Parquet files and uses them for better performance:
 
 ```python
-from compile.generator_polars_gpu import batch_process_csvs, generate
+from compile.generator import batch_process_csvs, generate, generate_timebins_from_batches
 
 # Process in batches
 batch_process_csvs(
-    csv_folder,
+    converted_dir,
     batch_size=2,
     time_bin_size=5,
     checkpoint_dir="batched",
-    compute_timebins=True
+    compute_timebins=True,
+    input_format="auto"  # "auto" (prefers parquet), "parquet", or "csv"
 )
 
 # Generate final summaries
 generate("batched", "result")
 generate_timebins_from_batches("batched", "result")
 ```
+
+The `input_format` parameter:
+- `"auto"` - Automatically detects and prefers Parquet over CSV (recommended)
+- `"parquet"` - Use only Parquet files
+- `"csv"` - Use only CSV files
 
 **Outputs:**
 - `result/summary_bot.csv` - Per-bot aggregated statistics
@@ -112,13 +128,13 @@ generate_timebins_from_batches("batched", "result")
 
 #### Step 2.3: Generate Arena Heatmaps
 
-Create spatial heatmaps showing bot movement patterns:
+Create spatial heatmaps showing bot movement patterns. Supports both Parquet and CSV input:
 
 ```python
-from compile.generate_arena_heatmap import create_phased_heatmaps_all_bots
+from compile.arena_generator import create_phased_heatmaps_all_bots
 
 create_phased_heatmaps_all_bots(
-    csv_folder,
+    converted_dir,
     output_dir="result/arena_heatmaps",
     actor_position="both",
     use_time_windows=True,
@@ -231,13 +247,16 @@ sumobot-analytic/
 ├── streamlit_plot.py           # Interactive dashboard (optional)
 ├── requirements.txt            # Python dependencies
 ├── compile/                    # Data processing modules
+│   ├── log_to_parquet.py      # Convert simulation logs to Parquet (recommended)
 │   ├── log_to_csv.py          # Convert simulation logs to CSV
-│   ├── generator_polars_gpu.py # Generate summary statistics
-│   └── generate_arena_heatmap.py # Create spatial heatmaps
+│   ├── generator.py           # Generate summary statistics
+│   └── arena_generator.py     # Create spatial heatmaps
 ├── plotting/                   # Visualization modules
 │   ├── overall_analyzer.py    # Cross-bot analysis plots
 │   ├── individual_analyzer.py # Per-bot analysis plots
 │   └── stoc.py                # Streamlit table of contents
+├── converted/                  # Converted Parquet/CSV files (auto-created)
+├── batched/                    # Batch checkpoints (auto-created)
 └── result/                     # Generated output (auto-created)
     ├── summary_bot.csv
     ├── summary_matchup.csv
