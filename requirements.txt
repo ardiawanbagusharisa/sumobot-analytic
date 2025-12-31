@@ -1,0 +1,9 @@
+matplotlib
+numpy
+pandas
+plotly
+reportlab
+seaborn
+streamlit
+streamlit_modal
+Unidecode

@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__
+*.csv
+batched
+*.log
+*.duckdb
+arena_heatmap
+analysis_output
+arena_heatmaps
+result
