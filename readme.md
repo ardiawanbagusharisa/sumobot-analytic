@@ -273,8 +273,8 @@ Located in Unity's data directory:
 Simulation/
 └── BotA_vs_BotB/
     └── Timer60_ActInterval0.1_Round1_SkillNone_SkillNone/
-        ├── game_0.log
-        ├── game_1.log
+        ├── game_0.json
+        ├── game_1.json
         └── ...
 ```
 
