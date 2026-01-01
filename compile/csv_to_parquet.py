@@ -89,13 +89,14 @@ def compare_file_sizes(directory: str):
 if __name__ == "__main__":
     # Example usage:
     simulation_root = "/Users/defdef/Library/Application Support/DefaultCompany/Sumobot/Simulation"
+    output_root = "/Users/defdef/Library/Application Support/DefaultCompany/Sumobot/Simulation"
 
     # Option 1: Convert in-place (parquet files alongside csv files)
-    convert_all_csv_to_parquet(simulation_root, inplace=True)
+    convert_all_csv_to_parquet(simulation_root, inplace=True, output_root=output_root)
 
     # Option 2: Convert to separate output directory
     # output_root = "/Users/defdef/Development/research/sumobot/sumobot_data/parquet_output"
     # convert_all_csv_to_parquet(simulation_root, output_root=output_root)
 
     # Compare file sizes
-    compare_file_sizes(simulation_root)
+    # compare_file_sizes(simulation_root)
