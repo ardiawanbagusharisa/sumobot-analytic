@@ -1902,10 +1902,13 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
                 axes[idx].plot(bot_x_line, bot_y_line, '--', linewidth=1.5, color=color, alpha=0.7)
 
         # Overall regression line
-        slope, intercept = np.polyfit(plot_data[action], plot_data['WinRate'], 1)
-        x_line = np.linspace(plot_data[action].min(), plot_data[action].max(), 100)
-        y_line = slope * x_line + intercept
-        axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5)
+        overall_x = plot_data[action].values
+        overall_y = plot_data['WinRate'].values
+        if len(overall_x) > 1 and overall_x.std() > 0:  # Need at least 2 points and variance for regression
+            slope, intercept = np.polyfit(overall_x, overall_y, 1)
+            x_line = np.linspace(overall_x.min(), overall_x.max(), 100)
+            y_line = slope * x_line + intercept
+            axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5)
 
         # Correlation info
         corr_text = f'r={pearson_r:.3f}\np={pearson_p:.2e}'
@@ -1999,10 +2002,13 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
                 axes[idx].plot(bot_x_line, bot_y_line, '--', linewidth=1.5, color=color, alpha=0.7)
 
         # Overall regression line
-        slope, intercept = np.polyfit(plot_data[action], plot_data['WinRate'], 1)
-        x_line = np.linspace(plot_data[action].min(), plot_data[action].max(), 100)
-        y_line = slope * x_line + intercept
-        axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5)
+        overall_x = plot_data[action].values
+        overall_y = plot_data['WinRate'].values
+        if len(overall_x) > 1 and overall_x.std() > 0:  # Need at least 2 points and variance for regression
+            slope, intercept = np.polyfit(overall_x, overall_y, 1)
+            x_line = np.linspace(overall_x.min(), overall_x.max(), 100)
+            y_line = slope * x_line + intercept
+            axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5)
 
         # Correlation info
         corr_text = f'r={pearson_r:.3f}\np={pearson_p:.2e}'
