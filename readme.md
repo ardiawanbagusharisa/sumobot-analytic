@@ -46,7 +46,12 @@ Required packages:
 
 1. **Configure paths** in `analysis.ipynb`:
    ```python
+   # macOS/Linux
    simulation_root = "/path/to/Simulation"  # Unity simulation logs
+
+   # Windows
+   # simulation_root = "C:\\path\\to\\Simulation"
+
    converted_dir = "converted"              # Converted Parquet/CSV files
    ```
 
@@ -65,8 +70,27 @@ The main analysis is performed in **`analysis.ipynb`**, which is divided into th
 
 Set up directory paths for input simulation logs and output files:
 
+**macOS:**
 ```python
 simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
+converted_dir = "converted"
+summarized_dir = "result"
+batch_checkpoint_dir = "batched"
+arena_heatmaps_output = "result/arena_heatmaps"
+```
+
+**Windows:**
+```python
+simulation_root = "C:\\Users\\user_name\\AppData\\LocalLow\\DefaultCompany\\Sumobot\\Logs\\Batch\\20251231_170916_batch"
+converted_dir = "converted"
+summarized_dir = "result"
+batch_checkpoint_dir = "batched"
+arena_heatmaps_output = "result/arena_heatmaps"
+```
+
+**Linux:**
+```python
+simulation_root = "/home/user_name/.config/unity3d/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
 converted_dir = "converted"
 summarized_dir = "result"
 batch_checkpoint_dir = "batched"
