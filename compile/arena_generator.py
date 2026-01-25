@@ -1296,7 +1296,7 @@ def plot_distance_distributions(df, bot1_name="Bot 1", bot2_name="Bot 2", output
 
     return fig
 
-def load_all_game_data(base_dir, bot1_name=None, bot2_name=None, chunksize=50000, max_configs=None):
+def load_all_game_data(base_dir, bot1_name=None, bot2_name=None, chunksize=50000, max_configs=None, input_format="auto"):
     """
     Load all game data from simulation directory, optionally filtered by bot matchup
 
@@ -1304,8 +1304,9 @@ def load_all_game_data(base_dir, bot1_name=None, bot2_name=None, chunksize=50000
         base_dir: Base simulation directory
         bot1_name: Name of bot 1 (optional filter)
         bot2_name: Name of bot 2 (optional filter)
-        chunksize: Chunk size for reading CSV files
+        chunksize: Chunk size for reading CSV/Parquet files
         max_configs: Maximum number of configs to process (None for all)
+        input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
 
     Returns:
         DataFrame with all game data including both actors
@@ -1341,13 +1342,21 @@ def load_all_game_data(base_dir, bot1_name=None, bot2_name=None, chunksize=50000
         for config_folder in tqdm(config_folders, desc=f"  Loading {matchup_folder}", leave=False):
             config_path = os.path.join(matchup_path, config_folder)
 
-            # Find CSV file
+            # Find data file (prefer Parquet, fallback to CSV based on input_format)
+            parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
             csv_files = glob.glob(os.path.join(config_path, "*.csv"))
 
-            if csv_files:
-                csv_path = csv_files[0]
+            if input_format == "parquet":
+                data_files = parquet_files
+            elif input_format == "csv":
+                data_files = csv_files
+            else:  # "auto" - prefer parquet
+                data_files = parquet_files if parquet_files else csv_files
+
+            if data_files:
+                data_path = data_files[0]
                 # Load WITHOUT actor filter (we need both bots)
-                df = load_data_chunked(csv_path, chunksize, actor_filter=None)
+                df = load_data_chunked(data_path, chunksize, actor_filter=None)
 
                 if not df.is_empty():
                     all_data.append(df)
@@ -1365,7 +1374,7 @@ def load_all_game_data(base_dir, bot1_name=None, bot2_name=None, chunksize=50000
 
     return df_combined
 
-def create_distance_over_time_all_bots(base_dir, output_dir="arena_heatmaps", chunksize=50000, max_configs=None):
+def create_distance_over_time_all_bots(base_dir, output_dir="arena_heatmaps", chunksize=50000, max_configs=None, input_format="auto"):
     """
     Create distance over time line plots for all bots (vs all opponents, grouped by Timer)
     Saves plots in each bot's directory within the output_dir
@@ -1373,8 +1382,9 @@ def create_distance_over_time_all_bots(base_dir, output_dir="arena_heatmaps", ch
     Args:
         base_dir: Base simulation directory
         output_dir: Base output directory (plots will be saved in bot subdirectories)
-        chunksize: Chunk size for reading CSV files
+        chunksize: Chunk size for reading CSV/Parquet files
         max_configs: Maximum number of configs to process
+        input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
     """
     # Find all unique bot names from matchup folders
     matchup_folders = [f for f in os.listdir(base_dir)
@@ -1412,7 +1422,7 @@ def create_distance_over_time_all_bots(base_dir, output_dir="arena_heatmaps", ch
     print("=" * 60)
 
 
-def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatmaps", chunksize=50000, max_configs=None, skip_initial=0.0):
+def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatmaps", chunksize=50000, max_configs=None, skip_initial=0.0, input_format="auto"):
     """
     Create distance distribution plots per bot (averaged across all matchups).
     Saves to {output_dir}/{bot_name}/distance_distribution.png
@@ -1420,9 +1430,10 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     Args:
         base_dir: Base simulation directory
         output_dir: Output directory (should be arena_heatmaps folder)
-        chunksize: Chunk size for reading CSV files
+        chunksize: Chunk size for reading CSV/Parquet files
         max_configs: Maximum number of configs to process per matchup
         skip_initial: Skip initial N seconds of data to remove spawn point bias (default: 0.0)
+        input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
     """
     # Find all matchup folders
     matchup_folders = [f for f in os.listdir(base_dir)
@@ -1448,7 +1459,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
         bot1_name, bot2_name = parts[0], parts[1]
 
         # Load data for this matchup
-        df = load_all_game_data(base_dir, bot1_name, bot2_name, chunksize, max_configs)
+        df = load_all_game_data(base_dir, bot1_name, bot2_name, chunksize, max_configs, input_format)
 
         if df.is_empty():
             print(f"  No data found for {matchup_folder}, skipping...")
@@ -1547,7 +1558,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     print(f"✅ Completed! Distance distribution plots saved in bot folders")
     print("=" * 60)
 
-def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0):
+def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto"):
     """
     Create heatmaps and position distribution plots for all bots in the simulation directory
     Saves individual phase/timer images for each bot
@@ -1556,13 +1567,14 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         base_dir: Base simulation directory
         output_dir: Output directory for heatmaps (default: "arena_heatmap")
         actor_position: "left", "right", or "both"
-        chunksize: Chunk size for reading CSV files
+        chunksize: Chunk size for reading CSV/Parquet files
         max_configs: Maximum number of configs to process per matchup
         mode: What to generate - "heatmap", "position", or "all" (default: "all")
         use_timer: If True, group by Timer values instead of phases
         use_time_windows: If True, group by fixed time windows [0-15s, 15-30s, 30-45s, 45-60s]
         include_distance_over_time: If True, also generate distance over time plot (default: True)
         skip_initial: Skip initial N seconds of data to remove spawn point bias (default: 0.0)
+        input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
     """
     # Find all unique bot names from matchup folders
     matchup_folders = [f for f in os.listdir(base_dir)
@@ -1819,7 +1831,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         bot1_name, bot2_name = parts[0], parts[1]
 
         # Load data for this matchup
-        df = load_all_game_data(base_dir, bot1_name, bot2_name, chunksize, max_configs)
+        df = load_all_game_data(base_dir, bot1_name, bot2_name, chunksize, max_configs, input_format)
 
         if df.is_empty():
             print(f"  No data found for {matchup_folder}, skipping...")
