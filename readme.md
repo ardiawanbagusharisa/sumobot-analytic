@@ -44,23 +44,46 @@ Required packages:
 
 ## Quick Start
 
-1. **Configure paths** in `analysis.ipynb`:
+1. **Create and activate a local Python environment**:
+
+   ```bash
+   # Create virtual environment
+   python3 -m venv venv
+
+   # Activate the environment
+   # macOS/Linux:
+   source venv/bin/activate
+
+   # Windows:
+   # venv\Scripts\activate
+
+   # Install dependencies
+   pip install -r requirements.txt
+
+   # Install ipykernel to make this environment available as a Jupyter kernel
+   pip install ipykernel
+   python -m ipykernel install --user --name=sumobot-env --display-name "Python (sumobot-env)"
+   ```
+
+   The environment will now be available for selection in:
+   - Jupyter Notebook/JupyterLab (select "Python (sumobot-env)" kernel)
+   - VS Code (select "Python (sumobot-env)" when choosing a kernel for .ipynb files)
+
+2. **Configure paths** in `analysis.ipynb`:
    ```python
    # macOS/Linux
    simulation_root = "/path/to/Simulation"  # Unity simulation logs
 
    # Windows
    # simulation_root = "C:\\path\\to\\Simulation"
-
-   converted_dir = "converted"              # Converted Parquet/CSV files
    ```
 
-2. **Run the analysis notebook**:
+3. **Run the analysis notebook**:
    ```bash
    jupyter notebook analysis.ipynb
    ```
 
-3. **Execute cells sequentially** to process data and generate visualizations
+4. **Execute cells sequentially** to process data and generate visualizations
 
 ## Analysis Workflow
 
@@ -73,28 +96,16 @@ Set up directory paths for input simulation logs and output files:
 **macOS:**
 ```python
 simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
-converted_dir = "converted"
-summarized_dir = "result"
-batch_checkpoint_dir = "batched"
-arena_heatmaps_output = "result/arena_heatmaps"
 ```
 
 **Windows:**
 ```python
 simulation_root = "C:\\Users\\user_name\\AppData\\LocalLow\\DefaultCompany\\Sumobot\\Logs\\Batch\\20251231_170916_batch"
-converted_dir = "converted"
-summarized_dir = "result"
-batch_checkpoint_dir = "batched"
-arena_heatmaps_output = "result/arena_heatmaps"
 ```
 
 **Linux:**
 ```python
 simulation_root = "/home/user_name/.config/unity3d/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
-converted_dir = "converted"
-summarized_dir = "result"
-batch_checkpoint_dir = "batched"
-arena_heatmaps_output = "result/arena_heatmaps"
 ```
 
 ### 2. Data Compilation
