@@ -1356,6 +1356,226 @@ def plot_collision_distribution_stacked(df, bot_col="Bot_L", width=10, height=6,
     return fig
 
 
+def plot_pacing_factors_comparison(
+    df,
+    width=18,
+    height=12,
+):
+    """
+    Plot pacing factors comparing all bots on the same charts.
+    Shows mean lines for all bots across all 8 pacing factors.
+
+    Args:
+        df: DataFrame from summary_pacing_per_bot.csv with columns:
+            Bot, TimeBin, <Factor>_min, <Factor>_max, <Factor>_mean, <Factor>_std
+        width: Figure width
+        height: Figure height
+
+    Returns:
+        Figure with 4x2 grid comparing all bots
+    """
+    # Define pacing factors (ordered as: Threat, then Tempo)
+    threat_factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance']
+    tempo_factors = ['ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
+    all_factors = threat_factors + tempo_factors
+
+    # Factor display names and units
+    factor_info = {
+        'CollisionRatio': {'label': 'Collision Ratio', 'unit': '(ratio)'},
+        'AbilityRatio': {'label': 'Ability Ratio', 'unit': '(ratio)'},
+        'Angle': {'label': 'Collision Angle', 'unit': '(degrees)'},
+        'SafeDistance': {'label': 'Safe Distance', 'unit': '(units)'},
+        'ActionIntensity': {'label': 'Action Intensity', 'unit': '(count)'},
+        'ActionDensity': {'label': 'Action Density', 'unit': '(entropy)'},
+        'BotsDistance': {'label': 'Bots Distance', 'unit': '(units)'},
+        'Velocity': {'label': 'Velocity', 'unit': '(units/s)'},
+    }
+
+    # Get unique bots
+    bots = sorted(df['Bot'].unique())
+
+    # Create 4x2 subplot grid
+    fig, axes = plt.subplots(4, 2, figsize=(width, height))
+    axes = axes.flatten()
+
+    for idx, factor in enumerate(all_factors):
+        ax = axes[idx]
+        mean_col = f'{factor}_mean'
+
+        if mean_col not in df.columns:
+            ax.text(0.5, 0.5, f'No data for {factor}',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(factor_info[factor]['label'])
+            continue
+
+        # Plot each bot
+        for bot in bots:
+            bot_df = df[df['Bot'] == bot].sort_values('TimeBin')
+            if bot_df.empty:
+                continue
+
+            x = bot_df['TimeBin'].values
+            mean = bot_df[mean_col].values
+
+            # Get bot-specific styling
+            color = get_bot_color(bot)
+            marker = get_bot_marker(bot)
+
+            ax.plot(x, mean, linewidth=2, marker=marker, markersize=6,
+                   label=bot, color=color, alpha=0.8)
+
+        # Styling
+        info = factor_info[factor]
+        ax.set_title(f"{info['label']} {info['unit']}",
+                    fontsize=11, fontweight='bold')
+        ax.set_xlabel('Time (s)', fontsize=9)
+        ax.set_ylabel(info['label'], fontsize=9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        # Add legend only to first subplot
+        if idx == 0:
+            ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
+
+    # Add overall title
+    fig.suptitle('Pacing Factors Comparison - All Bots',
+                fontsize=16, fontweight='bold', y=0.995)
+
+    # Add aspect labels
+    fig.text(0.02, 0.75, 'THREAT ASPECT', fontsize=12, fontweight='bold',
+            rotation=90, va='center', color=get_theme_color('primary'))
+    fig.text(0.02, 0.25, 'TEMPO ASPECT', fontsize=12, fontweight='bold',
+            rotation=90, va='center', color=get_theme_color('secondary'))
+
+    fig.tight_layout(rect=[0.03, 0, 1, 0.99])
+    return fig
+
+
+def plot_pacing_factors_per_bot(
+    df,
+    bot_name=None,
+    width=16,
+    height=10,
+):
+    """
+    Plot pacing factors over time for a specific bot.
+    Shows min, max, mean, and std for all 8 pacing factors.
+
+    Args:
+        df: DataFrame from summary_pacing_per_bot.csv with columns:
+            Bot, TimeBin, <Factor>_min, <Factor>_max, <Factor>_mean, <Factor>_std
+        bot_name: Name of bot to plot (if None, plots all bots)
+        width: Figure width
+        height: Figure height
+
+    Returns:
+        Dictionary of figures by bot name
+    """
+    # Get unique bots
+    bots = sorted(df['Bot'].unique())
+
+    if bot_name:
+        if bot_name not in bots:
+            print(f"⚠️ Bot '{bot_name}' not found in data. Available: {bots}")
+            return None
+        bots = [bot_name]
+
+    # Define pacing factors (ordered as: Threat, then Tempo)
+    threat_factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance']
+    tempo_factors = ['ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
+    all_factors = threat_factors + tempo_factors
+
+    # Factor display names and units
+    factor_info = {
+        'CollisionRatio': {'label': 'Collision Ratio', 'unit': '(ratio)'},
+        'AbilityRatio': {'label': 'Ability Ratio', 'unit': '(ratio)'},
+        'Angle': {'label': 'Collision Angle', 'unit': '(degrees)'},
+        'SafeDistance': {'label': 'Safe Distance', 'unit': '(units)'},
+        'ActionIntensity': {'label': 'Action Intensity', 'unit': '(count)'},
+        'ActionDensity': {'label': 'Action Density', 'unit': '(entropy)'},
+        'BotsDistance': {'label': 'Bots Distance', 'unit': '(units)'},
+        'Velocity': {'label': 'Velocity', 'unit': '(units/s)'},
+    }
+
+    figs = {}
+
+    for bot in bots:
+        bot_df = df[df['Bot'] == bot].sort_values('TimeBin')
+
+        if bot_df.empty:
+            print(f"⚠️ No data for bot '{bot}'")
+            continue
+
+        # Create 4x2 subplot grid (Threat top 2 rows, Tempo bottom 2 rows)
+        fig, axes = plt.subplots(4, 2, figsize=(width, height))
+        axes = axes.flatten()
+
+        for idx, factor in enumerate(all_factors):
+            ax = axes[idx]
+
+            # Check if columns exist
+            mean_col = f'{factor}_mean'
+            min_col = f'{factor}_min'
+            max_col = f'{factor}_max'
+            std_col = f'{factor}_std'
+
+            if mean_col not in bot_df.columns:
+                ax.text(0.5, 0.5, f'No data for {factor}',
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(factor_info[factor]['label'])
+                continue
+
+            x = bot_df['TimeBin'].values
+            mean = bot_df[mean_col].values
+
+            # Plot mean line
+            color = get_theme_color('primary') if idx < 4 else get_theme_color('secondary')
+            ax.plot(x, mean, linewidth=2.5, marker='o', markersize=4,
+                   label='Mean', color=color, zorder=3)
+
+            # Plot min/max shaded area if available
+            if min_col in bot_df.columns and max_col in bot_df.columns:
+                min_val = bot_df[min_col].values
+                max_val = bot_df[max_col].values
+                ax.fill_between(x, min_val, max_val, alpha=0.2, color=color,
+                               label='Min-Max Range', zorder=1)
+
+            # Plot std bands if available
+            if std_col in bot_df.columns:
+                std = bot_df[std_col].values
+                mean_plus_std = mean + std
+                mean_minus_std = mean - std
+                ax.fill_between(x, mean_minus_std, mean_plus_std, alpha=0.3,
+                               color=color, linestyle='--', edgecolor=color,
+                               label='±1 Std Dev', zorder=2)
+
+            # Styling
+            info = factor_info[factor]
+            ax.set_title(f"{info['label']} {info['unit']}",
+                        fontsize=11, fontweight='bold')
+            ax.set_xlabel('Time (s)', fontsize=9)
+            ax.set_ylabel(info['label'], fontsize=9)
+            ax.grid(True, alpha=0.3, linestyle='--')
+
+            # Add legend only to first subplot
+            if idx == 0:
+                ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
+
+        # Add overall title
+        fig.suptitle(f'Pacing Factors Over Time - {bot}',
+                    fontsize=16, fontweight='bold', y=0.995)
+
+        # Add aspect labels
+        fig.text(0.02, 0.75, 'THREAT ASPECT', fontsize=12, fontweight='bold',
+                rotation=90, va='center', color=get_theme_color('primary'))
+        fig.text(0.02, 0.25, 'TEMPO ASPECT', fontsize=12, fontweight='bold',
+                rotation=90, va='center', color=get_theme_color('secondary'))
+
+        fig.tight_layout(rect=[0.03, 0, 1, 0.99])
+        figs[bot] = fig
+
+    return figs
+
+
 def plot_collision_timebins_intensity(
     df,
     group_by="Bot_L",  # "Bot_L" or "Bot_R"

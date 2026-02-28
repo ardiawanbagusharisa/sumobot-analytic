@@ -290,7 +290,8 @@ def convert_all_configs(simulation_root: str, output_root: str):
 
 if __name__ == "__main__":
     # Example usage:
-    simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Simulation"
+    simulation_root = "/Users/def/Library/Application Support/DefaultCompany/Sumobot/Simulation"
+    target_root = "/Users/def/Simulation"
 
     # Convert all configs to parquet
-    convert_all_configs(simulation_root, simulation_root)
+    convert_all_configs(simulation_root, target_root)

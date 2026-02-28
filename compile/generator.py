@@ -76,24 +76,26 @@ def scan_file(file_path):
         raise ValueError(f"Unsupported file format: {file_path}. Only .csv and .parquet are supported.")
 
 
-def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=None, compute_timebins=False):
+def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, compute_pacing=False):
     """
     Process a batch of CSV files and create checkpoint
 
     Args:
         csv_paths: List of CSV file paths to process
         batch_checkpoint_dir: Directory to save checkpoints
-        time_bin_size: Size of time bins (only used if compute_timebins=True)
+        time_bin_size: Size of time bins (only used if compute_timebins=True or compute_pacing=True)
         compute_timebins: Whether to compute time-binned data
+        compute_pacing: Whether to compute pacing factors
 
     Returns:
-        tuple: (batch_df, action_timebin_df, collision_timebin_df) or (batch_df, None, None)
+        tuple: (batch_df, action_timebin_df, collision_timebin_df, pacing_factors_df)
     """
     os.makedirs(batch_checkpoint_dir, exist_ok=True)
 
     all_games_list = []
     time_fragment_list = [] if compute_timebins else None
     collision_fragment_list = [] if compute_timebins else None
+    pacing_fragment_list = [] if compute_pacing else None
 
     for csv_path in csv_paths:
         # Extract bot names and config from path
@@ -145,10 +147,19 @@ def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=
             if collision_tb:
                 collision_fragment_list.extend(collision_tb)
 
+        # Process pacing factors if requested
+        if compute_pacing and time_bin_size:
+            pacing_tb = process_pacing_factors_timebins_single_csv(
+                lf, bot_a, bot_b, config, time_bin_size
+            )
+            if pacing_tb:
+                pacing_fragment_list.extend(pacing_tb)
+
     # Concatenate all games from this batch
     batch_df = None
     action_timebin_df = None
     collision_timebin_df = None
+    pacing_factors_df = None
 
     if all_games_list:
         batch_df = pl.concat(all_games_list)
@@ -159,7 +170,11 @@ def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=
         if collision_fragment_list:
             collision_timebin_df = pl.DataFrame(collision_fragment_list)
 
-    return batch_df, action_timebin_df, collision_timebin_df
+    if compute_pacing:
+        if pacing_fragment_list:
+            pacing_factors_df = pl.DataFrame(pacing_fragment_list)
+
+    return batch_df, action_timebin_df, collision_timebin_df, pacing_factors_df
 
 
 def process_action_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
@@ -288,6 +303,188 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
     return collision_fragment_list
 
 
+def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
+    """
+    Process pacing factors per timebin for a single CSV/Parquet file
+    Calculates 8 pacing factors for both bots in each timebin:
+    - Threat: CollisionRatio, AbilityRatio, Angle, SafeDistance
+    - Tempo: ActionIntensity, ActionDensity, BotsDistance, Velocity
+
+    Returns list of time-binned pacing factor records (per matchup)
+    """
+    # Get match duration per game
+    match_dur_lf = lf.group_by("GameIndex").agg([
+        pl.col("UpdatedAt").max().alias("match_duration")
+    ])
+    match_durations = collect_with_gpu(match_dur_lf)
+
+    pacing_fragment_list = []
+
+    # Process each game
+    for game_idx in match_durations['GameIndex']:
+        match_dur = match_durations.filter(pl.col('GameIndex') == game_idx)['match_duration'][0]
+
+        bins = np.arange(0, match_dur + time_bin_size, time_bin_size)
+        if len(bins) < 2:
+            continue
+
+        # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio) =====
+        action_data_lf = lf.filter(
+            (pl.col("GameIndex") == game_idx) &
+            (pl.col("Category") == "Action") &
+            (pl.col("State").cast(pl.Int32) != 2)  # Exclude state 2
+        ).select(["Actor", "UpdatedAt", "Name"])
+        action_data = collect_with_gpu(action_data_lf).to_pandas()
+
+        # ===== 2. COLLISION DATA (for CollisionRatio, Angle, SafeDistance) =====
+        collision_data_lf = lf.filter(
+            (pl.col("GameIndex") == game_idx) &
+            (pl.col("Category") == "Collision") &
+            (pl.col("State").cast(pl.Utf8) == "0")
+        ).select([
+            "Actor", "UpdatedAt", "ColTieBreaker", "ColActor",
+            "BotPosX", "BotPosY", "BotRot", "BotLinv",
+            "EnemyBotPosX", "EnemyBotPosY", "EnemyBotRot", "EnemyBotLinv"
+        ])
+        collision_data = collect_with_gpu(collision_data_lf).to_pandas()
+
+        # ===== 3. GENERAL POSITION DATA (for BotsDistance, Velocity) =====
+        # Sample from all categories to get average distance/velocity
+        position_data_lf = lf.filter(
+            pl.col("GameIndex") == game_idx
+        ).select([
+            "Actor", "UpdatedAt",
+            "BotPosX", "BotPosY", "BotLinv",
+            "EnemyBotPosX", "EnemyBotPosY", "EnemyBotLinv"
+        ])
+        position_data = collect_with_gpu(position_data_lf).to_pandas()
+
+        # Process each timebin
+        for i in range(len(bins) - 1):
+            time_start = bins[i]
+            time_end = bins[i + 1]
+
+            # Filter data for this timebin
+            action_bin = action_data[(action_data['UpdatedAt'] >= time_start) &
+                                     (action_data['UpdatedAt'] < time_end)]
+            collision_bin = collision_data[(collision_data['UpdatedAt'] >= time_start) &
+                                           (collision_data['UpdatedAt'] < time_end)]
+            position_bin = position_data[(position_data['UpdatedAt'] >= time_start) &
+                                         (position_data['UpdatedAt'] < time_end)]
+
+            # Calculate factors for each bot (Actor 0 = Bot_L, Actor 1 = Bot_R)
+            factors = {}
+
+            for actor_id, bot_suffix in [(0, "_L"), (1, "_R")]:
+                action_actor = action_bin[action_bin['Actor'] == actor_id]
+                collision_actor = collision_bin[collision_bin['Actor'] == actor_id]
+                position_actor = position_bin[position_bin['Actor'] == actor_id]
+
+                # ----- THREAT FACTORS -----
+
+                # 1. CollisionRatio: Hit collisions / Total collisions
+                if len(collision_actor) > 0:
+                    hit_collisions = len(collision_actor[
+                        (collision_actor['ColTieBreaker'] == False) &
+                        (collision_actor['ColActor'] == True)
+                    ])
+                    total_collisions = len(collision_actor)
+                    collision_ratio = hit_collisions / total_collisions if total_collisions > 0 else 0
+                else:
+                    collision_ratio = 0
+
+                # 2. AbilityRatio: (Dash + Skills) / Total actions
+                if len(action_actor) > 0:
+                    ability_actions = len(action_actor[action_actor['Name'].isin(['Dash', 'SkillBoost', 'SkillStone'])])
+                    total_actions = len(action_actor)
+                    ability_ratio = ability_actions / total_actions if total_actions > 0 else 0
+                else:
+                    ability_ratio = 0
+
+                # 3. Angle: Average angle between bot and opponent during collisions
+                if len(collision_actor) > 0:
+                    # Calculate relative angle between bots
+                    bot_rot = collision_actor['BotRot'].values
+                    enemy_rot = collision_actor['EnemyBotRot'].values
+
+                    # Angle difference (absolute, normalized to 0-180)
+                    angle_diff = np.abs(bot_rot - enemy_rot)
+                    angle_diff = np.minimum(angle_diff, 360 - angle_diff)  # Normalize to 0-180
+                    avg_angle = np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else 0
+                else:
+                    avg_angle = 0
+
+                # 4. SafeDistance: Average distance during collisions
+                if len(collision_actor) > 0:
+                    bot_x = collision_actor['BotPosX'].values
+                    bot_y = collision_actor['BotPosY'].values
+                    enemy_x = collision_actor['EnemyBotPosX'].values
+                    enemy_y = collision_actor['EnemyBotPosY'].values
+
+                    distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
+                    avg_safe_distance = np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0
+                else:
+                    avg_safe_distance = 0
+
+                # ----- TEMPO FACTORS -----
+
+                # 5. ActionIntensity: Number of actions
+                action_intensity = len(action_actor)
+
+                # 6. ActionDensity: Shannon entropy of action distribution
+                if len(action_actor) > 0:
+                    action_counts = action_actor['Name'].value_counts(normalize=True)
+                    entropy = -np.sum(action_counts * np.log2(action_counts + 1e-10))
+                    action_density = entropy
+                else:
+                    action_density = 0
+
+                # 7. BotsDistance: Average distance between bots
+                if len(position_actor) > 0:
+                    bot_x = position_actor['BotPosX'].values
+                    bot_y = position_actor['BotPosY'].values
+                    enemy_x = position_actor['EnemyBotPosX'].values
+                    enemy_y = position_actor['EnemyBotPosY'].values
+
+                    distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
+                    avg_bots_distance = np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0
+                else:
+                    avg_bots_distance = 0
+
+                # 8. Velocity: Average linear velocity
+                if len(position_actor) > 0:
+                    velocities = position_actor['BotLinv'].values
+                    avg_velocity = np.mean(velocities[~np.isnan(velocities)]) if len(velocities) > 0 else 0
+                else:
+                    avg_velocity = 0
+
+                # Store factors with suffix
+                factors[f'CollisionRatio{bot_suffix}'] = collision_ratio
+                factors[f'AbilityRatio{bot_suffix}'] = ability_ratio
+                factors[f'Angle{bot_suffix}'] = avg_angle
+                factors[f'SafeDistance{bot_suffix}'] = avg_safe_distance
+                factors[f'ActionIntensity{bot_suffix}'] = action_intensity
+                factors[f'ActionDensity{bot_suffix}'] = action_density
+                factors[f'BotsDistance{bot_suffix}'] = avg_bots_distance
+                factors[f'Velocity{bot_suffix}'] = avg_velocity
+
+            # Append record
+            pacing_fragment_list.append({
+                'GameIndex': game_idx,
+                'Bot_L': bot_a,
+                'Bot_R': bot_b,
+                'Timer': config.get('Timer'),
+                'ActInterval': config.get('ActInterval'),
+                'Round': config.get('Round'),
+                'SkillLeft': config.get('SkillLeft'),
+                'SkillRight': config.get('SkillRight'),
+                'TimeBin': float(time_start),
+                **factors
+            })
+
+    return pacing_fragment_list
+
+
 def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, skill_left, skill_right):
     """
     Process a single CSV file using lazy evaluation
@@ -401,7 +598,7 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
-def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, input_format="csv"):
+def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, compute_pacing=False, input_format="csv"):
     """
     Process CSVs or Parquet files in batches and save checkpoints
     Similar to generator.py batch() function
@@ -411,8 +608,9 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
         base_dir: Base directory containing simulation data
         batch_size: Number of files per batch
         checkpoint_dir: Directory to save checkpoints
-        time_bin_size: Size of time bins (only used if compute_timebins=True)
+        time_bin_size: Size of time bins (only used if compute_timebins=True or compute_pacing=True)
         compute_timebins: Whether to compute time-binned data
+        compute_pacing: Whether to compute pacing factors
         input_format: "csv", "parquet", or "auto" to detect both
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -423,6 +621,11 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
         collision_timebin_dir = os.path.join(checkpoint_dir, "collision_timebins")
         os.makedirs(action_timebin_dir, exist_ok=True)
         os.makedirs(collision_timebin_dir, exist_ok=True)
+
+    # Create checkpoint dir for pacing factors if needed
+    if compute_pacing:
+        pacing_factors_dir = os.path.join(checkpoint_dir, "pacing_factors")
+        os.makedirs(pacing_factors_dir, exist_ok=True)
 
     # Find all data files grouped by matchup/config
     all_files = []
@@ -476,8 +679,8 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
 
         print(f"\nProcessing batch {batch_num}/{total_batches} ({len(batch_files)} files)...")
 
-        batch_df, action_timebin_df, collision_timebin_df = process_batch_csvs(
-            batch_files, checkpoint_dir, time_bin_size=time_bin_size, compute_timebins=compute_timebins
+        batch_df, action_timebin_df, collision_timebin_df, pacing_factors_df = process_batch_csvs(
+            batch_files, checkpoint_dir, time_bin_size=time_bin_size, compute_timebins=compute_timebins, compute_pacing=compute_pacing
         )
 
         # Save game metrics batch
@@ -497,6 +700,13 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
                 collision_path = os.path.join(collision_timebin_dir, f"batch_{batch_num:02d}.csv")
                 collision_timebin_df.write_csv(collision_path)
                 print(f"Saved collision timebin batch: {collision_path}")
+
+        # Save pacing factors batch if computed
+        if compute_pacing:
+            if pacing_factors_df is not None:
+                pacing_path = os.path.join(pacing_factors_dir, f"batch_{batch_num:02d}.csv")
+                pacing_factors_df.write_csv(pacing_path)
+                print(f"Saved pacing factors batch: {pacing_path}")
 
 
 def create_summary_matchup(all_games, output_dir):
@@ -682,12 +892,26 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir):
         print("\n Creating collision time-bin summary...")
         summarize_collision_timebins(collision_timebin_df, output_dir)
 
+    # Load pacing factors batches
+    pacing_batch_files = sorted(glob.glob(f"{checkpoint_dir}/pacing_factors/batch_*.csv"))
+    if pacing_batch_files:
+        print(f"\n📂 Loading {len(pacing_batch_files)} pacing factors batch files...")
+        pacing_lazy_frames = [scan_file(f) for f in pacing_batch_files]
+        pacing_factors_df = collect_with_gpu(pl.concat(pacing_lazy_frames))
+        print(f"Loaded {len(pacing_factors_df):,} pacing factor records")
+
+        print("\n Creating pacing factors summary...")
+        summarize_pacing_factors(pacing_factors_df, output_dir)
+
     print("\n" + "=" * 60)
     print("🎉 Done! Created:")
     if action_batch_files:
         print("   - summary_action_timebins.csv")
     if collision_batch_files:
         print("   - summary_collision_timebins.csv")
+    if pacing_batch_files:
+        print("   - summary_pacing_factors.csv")
+        print("   - summary_pacing_per_bot.csv")
     print("=" * 60)
 
 
@@ -830,6 +1054,126 @@ def summarize_collision_timebins(collision_fragment_df, output_dir):
     return summary
 
 
+def summarize_pacing_factors(pacing_factors_df, output_dir):
+    """
+    Summarize pacing factors with GPU acceleration.
+    Computes mean and std for each factor per bot/config/timebin.
+    Also provides per-bot statistics across all matchups.
+    """
+    print(" Creating pacing factors summary...")
+
+    # Use lazy frames for GPU acceleration
+    # Aggregate per matchup
+    summary_lazy = pacing_factors_df.lazy().group_by(
+        ['Bot_L', 'Bot_R', 'Timer', 'ActInterval', 'Round', 'SkillLeft', 'SkillRight', 'TimeBin']
+    ).agg([
+        # Threat factors
+        pl.col('CollisionRatio_L').mean().alias('CollisionRatio_L_mean'),
+        pl.col('CollisionRatio_R').mean().alias('CollisionRatio_R_mean'),
+        pl.col('AbilityRatio_L').mean().alias('AbilityRatio_L_mean'),
+        pl.col('AbilityRatio_R').mean().alias('AbilityRatio_R_mean'),
+        pl.col('Angle_L').mean().alias('Angle_L_mean'),
+        pl.col('Angle_R').mean().alias('Angle_R_mean'),
+        pl.col('SafeDistance_L').mean().alias('SafeDistance_L_mean'),
+        pl.col('SafeDistance_R').mean().alias('SafeDistance_R_mean'),
+        # Tempo factors
+        pl.col('ActionIntensity_L').mean().alias('ActionIntensity_L_mean'),
+        pl.col('ActionIntensity_R').mean().alias('ActionIntensity_R_mean'),
+        pl.col('ActionDensity_L').mean().alias('ActionDensity_L_mean'),
+        pl.col('ActionDensity_R').mean().alias('ActionDensity_R_mean'),
+        pl.col('BotsDistance_L').mean().alias('BotsDistance_L_mean'),
+        pl.col('BotsDistance_R').mean().alias('BotsDistance_R_mean'),
+        pl.col('Velocity_L').mean().alias('Velocity_L_mean'),
+        pl.col('Velocity_R').mean().alias('Velocity_R_mean'),
+    ]).sort(['Bot_L', 'Bot_R', 'Timer', 'ActInterval', 'Round', 'TimeBin'])
+
+    summary = collect_with_gpu(summary_lazy)
+
+    # Save matchup-level summary
+    summary.write_csv(f"{output_dir}/summary_pacing_factors.csv")
+    print(f"Saved {output_dir}/summary_pacing_factors.csv")
+
+    # Create per-bot statistics (min, max, mean, std for constraint setting)
+    print(" Creating per-bot per-timebin pacing statistics for constraint setting...")
+
+    # Transform to per-bot format
+    bot_stats_list = []
+
+    for bot_side, suffix in [('Bot_L', '_L'), ('Bot_R', '_R')]:
+        bot_data = pacing_factors_df.lazy().select([
+            pl.col(bot_side).alias('Bot'),
+            pl.col('TimeBin'),  # Include TimeBin for per-segment stats
+            pl.col('Timer'),
+            pl.col('ActInterval'),
+            pl.col('Round'),
+            pl.col(f'CollisionRatio{suffix}').alias('CollisionRatio'),
+            pl.col(f'AbilityRatio{suffix}').alias('AbilityRatio'),
+            pl.col(f'Angle{suffix}').alias('Angle'),
+            pl.col(f'SafeDistance{suffix}').alias('SafeDistance'),
+            pl.col(f'ActionIntensity{suffix}').alias('ActionIntensity'),
+            pl.col(f'ActionDensity{suffix}').alias('ActionDensity'),
+            pl.col(f'BotsDistance{suffix}').alias('BotsDistance'),
+            pl.col(f'Velocity{suffix}').alias('Velocity'),
+        ])
+        bot_stats_list.append(bot_data)
+
+    # Combine both sides
+    all_bot_data = pl.concat(bot_stats_list)
+
+    # Compute statistics per bot per timebin
+    bot_stats_lazy = all_bot_data.group_by(['Bot', 'TimeBin']).agg([
+        # CollisionRatio
+        pl.col('CollisionRatio').min().alias('CollisionRatio_min'),
+        pl.col('CollisionRatio').max().alias('CollisionRatio_max'),
+        pl.col('CollisionRatio').mean().alias('CollisionRatio_mean'),
+        pl.col('CollisionRatio').std().alias('CollisionRatio_std'),
+        # AbilityRatio
+        pl.col('AbilityRatio').min().alias('AbilityRatio_min'),
+        pl.col('AbilityRatio').max().alias('AbilityRatio_max'),
+        pl.col('AbilityRatio').mean().alias('AbilityRatio_mean'),
+        pl.col('AbilityRatio').std().alias('AbilityRatio_std'),
+        # Angle
+        pl.col('Angle').min().alias('Angle_min'),
+        pl.col('Angle').max().alias('Angle_max'),
+        pl.col('Angle').mean().alias('Angle_mean'),
+        pl.col('Angle').std().alias('Angle_std'),
+        # SafeDistance
+        pl.col('SafeDistance').min().alias('SafeDistance_min'),
+        pl.col('SafeDistance').max().alias('SafeDistance_max'),
+        pl.col('SafeDistance').mean().alias('SafeDistance_mean'),
+        pl.col('SafeDistance').std().alias('SafeDistance_std'),
+        # ActionIntensity
+        pl.col('ActionIntensity').min().alias('ActionIntensity_min'),
+        pl.col('ActionIntensity').max().alias('ActionIntensity_max'),
+        pl.col('ActionIntensity').mean().alias('ActionIntensity_mean'),
+        pl.col('ActionIntensity').std().alias('ActionIntensity_std'),
+        # ActionDensity
+        pl.col('ActionDensity').min().alias('ActionDensity_min'),
+        pl.col('ActionDensity').max().alias('ActionDensity_max'),
+        pl.col('ActionDensity').mean().alias('ActionDensity_mean'),
+        pl.col('ActionDensity').std().alias('ActionDensity_std'),
+        # BotsDistance
+        pl.col('BotsDistance').min().alias('BotsDistance_min'),
+        pl.col('BotsDistance').max().alias('BotsDistance_max'),
+        pl.col('BotsDistance').mean().alias('BotsDistance_mean'),
+        pl.col('BotsDistance').std().alias('BotsDistance_std'),
+        # Velocity
+        pl.col('Velocity').min().alias('Velocity_min'),
+        pl.col('Velocity').max().alias('Velocity_max'),
+        pl.col('Velocity').mean().alias('Velocity_mean'),
+        pl.col('Velocity').std().alias('Velocity_std'),
+    ]).sort(['Bot', 'TimeBin'])
+
+    bot_stats = collect_with_gpu(bot_stats_lazy)
+
+    # Save per-bot per-timebin statistics
+    bot_stats.write_csv(f"{output_dir}/summary_pacing_per_bot.csv")
+    print(f"Saved {output_dir}/summary_pacing_per_bot.csv")
+    print(f"  Use this file to set constraint ranges (min, max) for each bot per 2-second segment")
+
+    return summary, bot_stats
+
+
 def generate(checkpoint_dir, output_dir):
     """
     Generate summary files from batched checkpoints
@@ -880,7 +1224,7 @@ def generate(checkpoint_dir, output_dir):
 if __name__ == "__main__":
     import sys
 
-    base_dir = "/Users/user_name/Documents/Simulation"
+    base_dir = "/Users/def/Documents/Simulation"
     checkpoint_dir = "batched"
     output_dir = "result"
     timebin_size = 5
@@ -900,6 +1244,16 @@ if __name__ == "__main__":
             batch_process_csvs(base_dir, batch_size=batch_size,
                              time_bin_size=timebin_size, compute_timebins=True,checkpoint_dir=checkpoint_dir)
 
+        elif command == "batch_with_pacing":
+            # Batch processing mode - with pacing factors
+            batch_process_csvs(base_dir, batch_size=batch_size,
+                             time_bin_size=timebin_size, compute_pacing=True,checkpoint_dir=checkpoint_dir)
+
+        elif command == "batch_with_all":
+            # Batch processing mode - with timebins AND pacing factors
+            batch_process_csvs(base_dir, batch_size=batch_size,
+                             time_bin_size=timebin_size, compute_timebins=True, compute_pacing=True,checkpoint_dir=checkpoint_dir)
+
         elif command == "generate":
             # Generate summaries from batches
             generate(checkpoint_dir,output_dir)
@@ -914,6 +1268,8 @@ if __name__ == "__main__":
             print("Usage:")
             print("  python generator_polars_gpu.py batch")
             print("  python generator_polars_gpu.py batch_with_timebins")
+            print("  python generator_polars_gpu.py batch_with_pacing")
+            print("  python generator_polars_gpu.py batch_with_all")
             print("  python generator_polars_gpu.py generate")
             print("  python generator_polars_gpu.py generate_timebins")
 
@@ -929,5 +1285,7 @@ if __name__ == "__main__":
         print("Usage:")
         print("  python generator_polars_gpu.py batch                  # Process game metrics only")
         print("  python generator_polars_gpu.py batch_with_timebins    # Process with time bins")
+        print("  python generator_polars_gpu.py batch_with_pacing      # Process with pacing factors")
+        print("  python generator_polars_gpu.py batch_with_all         # Process with time bins AND pacing factors")
         print("  python generator_polars_gpu.py generate               # Generate game summaries")
         print("  python generator_polars_gpu.py generate_timebins      # Generate timebin summaries")
