@@ -598,6 +598,125 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
+def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv"):
+    """
+    Process pacing factors in batches with bot filtering option
+
+    Args:
+        base_dir: Base directory containing simulation data
+        batch_size: Number of files per batch
+        checkpoint_dir: Directory to save checkpoints
+        time_bin_size: Size of time bins for pacing factors
+        bot_option: "all" for all bots, or specific bot name to filter (e.g., "BotA")
+        input_format: "csv", "parquet", or "auto" to detect both
+    """
+    if time_bin_size is None:
+        raise ValueError("time_bin_size must be specified for pacing factor computation")
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Create checkpoint dir for pacing factors
+    pacing_factors_dir = os.path.join(checkpoint_dir, "pacing_factors")
+    os.makedirs(pacing_factors_dir, exist_ok=True)
+
+    # Find all data files grouped by matchup/config
+    all_files = []
+    matchup_folders = [f for f in os.listdir(base_dir)
+                       if os.path.isdir(os.path.join(base_dir, f))]
+
+    for matchup_folder in matchup_folders:
+        # Filter by bot if bot_option is not "all"
+        if bot_option != "all":
+            # Check if the bot is in this matchup (either left or right)
+            match = re.match(r"(.+)_vs_(.+)", matchup_folder)
+            if not match:
+                continue
+            bot_a, bot_b = match.groups()
+            if bot_option not in [bot_a, bot_b]:
+                continue
+
+        matchup_path = os.path.join(base_dir, matchup_folder)
+        config_folders = [f for f in os.listdir(matchup_path)
+                         if os.path.isdir(os.path.join(matchup_path, f))]
+
+        for config_folder in config_folders:
+            config_path = os.path.join(matchup_path, config_folder)
+
+            # Collect files based on input format
+            if input_format == "csv":
+                files = glob.glob(os.path.join(config_path, "*.csv"))
+            elif input_format == "parquet":
+                files = glob.glob(os.path.join(config_path, "*.parquet"))
+            else:  # auto - prefer parquet, fallback to csv
+                parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
+                csv_files = glob.glob(os.path.join(config_path, "*.csv"))
+                files = parquet_files if parquet_files else csv_files
+
+            all_files.extend(files)
+
+    file_type = "Parquet" if input_format == "parquet" else "CSV/Parquet" if input_format == "auto" else "CSV"
+    bot_filter_msg = f"for bot '{bot_option}'" if bot_option != "all" else "for all bots"
+    print(f"Found {len(all_files)} {file_type} files to process {bot_filter_msg}")
+
+    # Determine which batches are already processed
+    processed_batches = set()
+    for f in os.listdir(pacing_factors_dir):
+        match = re.match(r"batch_(\d+)\.csv", f)
+        if match:
+            processed_batches.add(int(match.group(1)))
+
+    # Process in batches
+    total_batches = (len(all_files) + batch_size - 1) // batch_size
+
+    for batch_idx in range(total_batches):
+        batch_num = batch_idx + 1
+
+        # Skip if already processed
+        if batch_num in processed_batches:
+            print(f"Skipping pacing batch {batch_num}/{total_batches} (already processed)")
+            continue
+
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(all_files))
+        batch_files = all_files[start_idx:end_idx]
+
+        print(f"\nProcessing pacing batch {batch_num}/{total_batches} ({len(batch_files)} files)...")
+
+        # Process only pacing factors
+        pacing_fragment_list = []
+
+        for csv_path in batch_files:
+            # Extract bot names and config from path
+            parts = csv_path.split(os.sep)
+            matchup_folder = parts[-3]
+            config_folder = parts[-2]
+
+            match = re.match(r"(.+)_vs_(.+)", matchup_folder)
+            if not match:
+                continue
+            bot_a, bot_b = match.groups()
+
+            # Parse config
+            config = parse_config_name_cached(config_folder)
+
+            # Scan file (CSV or Parquet) with Polars lazy API
+            lf = scan_file(csv_path)
+
+            # Process pacing factors
+            pacing_tb = process_pacing_factors_timebins_single_csv(
+                lf, bot_a, bot_b, config, time_bin_size
+            )
+            if pacing_tb:
+                pacing_fragment_list.extend(pacing_tb)
+
+        # Save pacing factors batch if computed
+        if pacing_fragment_list:
+            pacing_factors_df = pl.DataFrame(pacing_fragment_list)
+            pacing_path = os.path.join(pacing_factors_dir, f"batch_{batch_num:02d}.csv")
+            pacing_factors_df.write_csv(pacing_path)
+            print(f"Saved pacing factors batch: {pacing_path} ({len(pacing_factors_df)} records)")
+
+
 def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, compute_pacing=False, input_format="csv"):
     """
     Process CSVs or Parquet files in batches and save checkpoints
@@ -1261,6 +1380,23 @@ if __name__ == "__main__":
         elif command == "generate_timebins":
             # Generate timebin summaries from timebin batches
             generate_timebins_from_batches(checkpoint_dir,output_dir)
+
+        elif command == "batch_pacing_all":
+            # Batch process pacing factors for all bots
+            batch_process_pacing(base_dir, batch_size=batch_size,
+                               time_bin_size=timebin_size, bot_option="all", checkpoint_dir=checkpoint_dir)
+
+        elif command == "batch_pacing_bot":
+            # Batch process pacing factors for specific bot
+            if len(sys.argv) < 3:
+                print("Error: Please specify a bot name")
+                print("Usage: python generator_polars_gpu.py batch_pacing_bot <bot_name>")
+                is_valid_process = False
+            else:
+                bot_name = sys.argv[2]
+                batch_process_pacing(base_dir, batch_size=batch_size,
+                                   time_bin_size=timebin_size, bot_option=bot_name, checkpoint_dir=checkpoint_dir)
+
         else:
             is_valid_process = False
             print("Unknown command:", command)
@@ -1272,6 +1408,8 @@ if __name__ == "__main__":
             print("  python generator_polars_gpu.py batch_with_all")
             print("  python generator_polars_gpu.py generate")
             print("  python generator_polars_gpu.py generate_timebins")
+            print("  python generator_polars_gpu.py batch_pacing_all")
+            print("  python generator_polars_gpu.py batch_pacing_bot <bot_name>")
 
         if not is_valid_process:
             exit()
@@ -1283,9 +1421,11 @@ if __name__ == "__main__":
 
     else:
         print("Usage:")
-        print("  python generator_polars_gpu.py batch                  # Process game metrics only")
-        print("  python generator_polars_gpu.py batch_with_timebins    # Process with time bins")
-        print("  python generator_polars_gpu.py batch_with_pacing      # Process with pacing factors")
-        print("  python generator_polars_gpu.py batch_with_all         # Process with time bins AND pacing factors")
-        print("  python generator_polars_gpu.py generate               # Generate game summaries")
-        print("  python generator_polars_gpu.py generate_timebins      # Generate timebin summaries")
+        print("  python generator_polars_gpu.py batch                     # Process game metrics only")
+        print("  python generator_polars_gpu.py batch_with_timebins       # Process with time bins")
+        print("  python generator_polars_gpu.py batch_with_pacing         # Process with pacing factors")
+        print("  python generator_polars_gpu.py batch_with_all            # Process with time bins AND pacing factors")
+        print("  python generator_polars_gpu.py batch_pacing_all          # Process pacing for all bots")
+        print("  python generator_polars_gpu.py batch_pacing_bot <name>   # Process pacing for specific bot")
+        print("  python generator_polars_gpu.py generate                  # Generate game summaries")
+        print("  python generator_polars_gpu.py generate_timebins         # Generate timebin summaries")
