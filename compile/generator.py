@@ -25,6 +25,8 @@ try:
 except Exception:
     print("Using CPU (GPU not available)")
 
+arena_center = np.array([0.24, 1.97])
+arena_radius = 4.73485
 
 def collect_with_gpu(lf):
     """Helper to collect LazyFrame with GPU if available"""
@@ -414,15 +416,17 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 else:
                     avg_angle = 0.0
 
-                # 4. SafeDistance: Average distance during collisions
+                # 4. SafeDistance: Distance from arena edge (normalized)
+                # safedistance = abs(arena_radius - robot_distance_from_center) / arena_radius
                 if len(collision_actor) > 0:
                     bot_x = collision_actor['BotPosX'].values
                     bot_y = collision_actor['BotPosY'].values
-                    enemy_x = collision_actor['EnemyBotPosX'].values
-                    enemy_y = collision_actor['EnemyBotPosY'].values
 
-                    distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
-                    avg_safe_distance = float(np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0.0)
+                    # Calculate distance from arena center
+                    distance_from_center = np.sqrt((bot_x - arena_center[0])**2 + (bot_y - arena_center[1])**2)
+                    # Calculate normalized distance from edge
+                    safe_distances = np.abs(arena_radius - distance_from_center) / arena_radius
+                    avg_safe_distance = float(np.mean(safe_distances[~np.isnan(safe_distances)]) if len(safe_distances) > 0 else 0.0)
                 else:
                     avg_safe_distance = 0.0
 
