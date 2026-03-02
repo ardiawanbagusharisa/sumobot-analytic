@@ -389,17 +389,17 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                         (collision_actor['ColActor'] == True)
                     ])
                     total_collisions = len(collision_actor)
-                    collision_ratio = hit_collisions / total_collisions if total_collisions > 0 else 0
+                    collision_ratio = float(hit_collisions / total_collisions if total_collisions > 0 else 0.0)
                 else:
-                    collision_ratio = 0
+                    collision_ratio = 0.0
 
                 # 2. AbilityRatio: (Dash + Skills) / Total actions
                 if len(action_actor) > 0:
                     ability_actions = len(action_actor[action_actor['Name'].isin(['Dash', 'SkillBoost', 'SkillStone'])])
                     total_actions = len(action_actor)
-                    ability_ratio = ability_actions / total_actions if total_actions > 0 else 0
+                    ability_ratio = float(ability_actions / total_actions if total_actions > 0 else 0.0)
                 else:
-                    ability_ratio = 0
+                    ability_ratio = 0.0
 
                 # 3. Angle: Average angle between bot and opponent during collisions
                 if len(collision_actor) > 0:
@@ -410,9 +410,9 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     # Angle difference (absolute, normalized to 0-180)
                     angle_diff = np.abs(bot_rot - enemy_rot)
                     angle_diff = np.minimum(angle_diff, 360 - angle_diff)  # Normalize to 0-180
-                    avg_angle = np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else 0
+                    avg_angle = float(np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else 0.0)
                 else:
-                    avg_angle = 0
+                    avg_angle = 0.0
 
                 # 4. SafeDistance: Average distance during collisions
                 if len(collision_actor) > 0:
@@ -422,22 +422,22 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     enemy_y = collision_actor['EnemyBotPosY'].values
 
                     distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
-                    avg_safe_distance = np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0
+                    avg_safe_distance = float(np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0.0)
                 else:
-                    avg_safe_distance = 0
+                    avg_safe_distance = 0.0
 
                 # ----- TEMPO FACTORS -----
 
                 # 5. ActionIntensity: Number of actions
-                action_intensity = len(action_actor)
+                action_intensity = float(len(action_actor))
 
                 # 6. ActionDensity: Shannon entropy of action distribution
                 if len(action_actor) > 0:
                     action_counts = action_actor['Name'].value_counts(normalize=True)
                     entropy = -np.sum(action_counts * np.log2(action_counts + 1e-10))
-                    action_density = entropy
+                    action_density = float(entropy)
                 else:
-                    action_density = 0
+                    action_density = 0.0
 
                 # 7. BotsDistance: Average distance between bots
                 if len(position_actor) > 0:
@@ -447,16 +447,16 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     enemy_y = position_actor['EnemyBotPosY'].values
 
                     distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
-                    avg_bots_distance = np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0
+                    avg_bots_distance = float(np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0.0)
                 else:
-                    avg_bots_distance = 0
+                    avg_bots_distance = 0.0
 
                 # 8. Velocity: Average linear velocity
                 if len(position_actor) > 0:
                     velocities = position_actor['BotLinv'].values
-                    avg_velocity = np.mean(velocities[~np.isnan(velocities)]) if len(velocities) > 0 else 0
+                    avg_velocity = float(np.mean(velocities[~np.isnan(velocities)]) if len(velocities) > 0 else 0.0)
                 else:
-                    avg_velocity = 0
+                    avg_velocity = 0.0
 
                 # Store factors with suffix
                 factors[f'CollisionRatio{bot_suffix}'] = collision_ratio
@@ -1015,8 +1015,38 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir):
     pacing_batch_files = sorted(glob.glob(f"{checkpoint_dir}/pacing_factors/batch_*.csv"))
     if pacing_batch_files:
         print(f"\n📂 Loading {len(pacing_batch_files)} pacing factors batch files...")
-        pacing_lazy_frames = [scan_file(f) for f in pacing_batch_files]
-        pacing_factors_df = collect_with_gpu(pl.concat(pacing_lazy_frames))
+
+        # Define the expected schema with all numeric fields as Float64
+        schema_overrides = {
+            'CollisionRatio_L': pl.Float64,
+            'AbilityRatio_L': pl.Float64,
+            'Angle_L': pl.Float64,
+            'SafeDistance_L': pl.Float64,
+            'ActionIntensity_L': pl.Float64,
+            'ActionDensity_L': pl.Float64,
+            'BotsDistance_L': pl.Float64,
+            'Velocity_L': pl.Float64,
+            'CollisionRatio_R': pl.Float64,
+            'AbilityRatio_R': pl.Float64,
+            'Angle_R': pl.Float64,
+            'SafeDistance_R': pl.Float64,
+            'ActionIntensity_R': pl.Float64,
+            'ActionDensity_R': pl.Float64,
+            'BotsDistance_R': pl.Float64,
+            'Velocity_R': pl.Float64,
+        }
+
+        # Load each file with schema alignment
+        pacing_dfs = []
+        for f in pacing_batch_files:
+            df = pl.read_csv(f)
+            # Cast all pacing factor columns to Float64 to ensure consistent schema
+            for col, dtype in schema_overrides.items():
+                if col in df.columns:
+                    df = df.with_columns(pl.col(col).cast(dtype))
+            pacing_dfs.append(df)
+
+        pacing_factors_df = pl.concat(pacing_dfs)
         print(f"Loaded {len(pacing_factors_df):,} pacing factor records")
 
         print("\n Creating pacing factors summary...")
