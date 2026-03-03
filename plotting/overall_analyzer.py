@@ -1586,9 +1586,102 @@ def plot_pacing_factors_per_bot(
                 rotation=90, va='center', color=get_theme_color('secondary'))
 
         fig.tight_layout(rect=[0.03, 0, 1, 0.99])
-        figs[bot] = fig
+
+        # Create data tables as DataFrames
+        per_timebin_df, summary_df = _create_pacing_data_dataframes(bot_df, all_factors, factor_info)
+
+        figs[bot] = {
+            'chart': fig,
+            'per_timebin_df': per_timebin_df,
+            'summary_df': summary_df
+        }
 
     return figs
+
+
+def _create_pacing_data_dataframes(bot_df, all_factors, factor_info):
+    """
+    Create DataFrames showing per-timebin statistics and summary statistics
+
+    Args:
+        bot_df: DataFrame filtered for specific bot
+        all_factors: List of all pacing factors
+        factor_info: Dictionary with factor metadata
+
+    Returns:
+        Tuple of (per_timebin_df, summary_df)
+    """
+    import pandas as pd
+
+    # ===== DATAFRAME 1: Per-Timebin Statistics =====
+    timebins = sorted(bot_df['TimeBin'].unique())
+    per_timebin_data = []
+
+    for tb in timebins:
+        tb_data = bot_df[bot_df['TimeBin'] == tb]
+        row = {'TimeBin': tb}
+
+        if len(tb_data) > 0:
+            for factor in all_factors:
+                factor_label = factor_info[factor]['label']
+                mean_col = f'{factor}_mean'
+                std_col = f'{factor}_std'
+
+                if mean_col in tb_data.columns:
+                    row[f'{factor_label}_Mean'] = round(tb_data[mean_col].values[0], 2)
+                else:
+                    row[f'{factor_label}_Mean'] = None
+
+                if std_col in tb_data.columns:
+                    row[f'{factor_label}_Std'] = round(tb_data[std_col].values[0], 2)
+                else:
+                    row[f'{factor_label}_Std'] = None
+
+        per_timebin_data.append(row)
+
+    per_timebin_df = pd.DataFrame(per_timebin_data)
+
+    # ===== DATAFRAME 2: Summary Statistics =====
+    summary_data = []
+
+    for factor in all_factors:
+        factor_label = factor_info[factor]['label']
+        mean_col = f'{factor}_mean'
+        std_col = f'{factor}_std'
+        min_col = f'{factor}_min'
+        max_col = f'{factor}_max'
+
+        row = {'Factor': factor_label}
+
+        # Overall mean (average of means across timebins)
+        if mean_col in bot_df.columns:
+            row['Overall_Mean'] = round(bot_df[mean_col].mean(), 2)
+        else:
+            row['Overall_Mean'] = None
+
+        # Overall std (average of stds across timebins)
+        if std_col in bot_df.columns:
+            row['Overall_Std'] = round(bot_df[std_col].mean(), 2)
+        else:
+            row['Overall_Std'] = None
+
+        # Overall min (min of mins across timebins)
+        if min_col in bot_df.columns:
+            row['Overall_Min'] = round(bot_df[min_col].min(), 2)
+        else:
+            row['Overall_Min'] = None
+
+        # Overall max (max of maxs across timebins)
+        if max_col in bot_df.columns:
+            row['Overall_Max'] = round(bot_df[max_col].max(), 2)
+        else:
+            row['Overall_Max'] = None
+
+        summary_data.append(row)
+
+    summary_df = pd.DataFrame(summary_data)
+
+    return per_timebin_df, summary_df
 
 
 def plot_collision_timebins_intensity(
