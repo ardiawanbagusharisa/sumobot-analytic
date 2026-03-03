@@ -206,7 +206,11 @@ def process_action_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
         game_df = raw_data_df.filter(pl.col('GameIndex') == game_idx)
         match_dur = game_df['match_duration'][0]
 
-        bins = np.arange(0, match_dur + time_bin_size, time_bin_size)
+        # Use timer config to determine max time bin (cap at timer setting)
+        timer_value = config.get('Timer')
+        max_time = min(match_dur, timer_value) if timer_value else match_dur
+
+        bins = np.arange(0, max_time + time_bin_size, time_bin_size)
         if len(bins) < 2:
             continue
 
@@ -268,7 +272,11 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
         game_df = raw_data_df.filter(pl.col('GameIndex') == game_idx)
         match_dur = game_df['match_duration'][0]
 
-        bins = np.arange(0, match_dur + time_bin_size, time_bin_size)
+        # Use timer config to determine max time bin (cap at timer setting)
+        timer_value = config.get('Timer')
+        max_time = min(match_dur, timer_value) if timer_value else match_dur
+
+        bins = np.arange(0, max_time + time_bin_size, time_bin_size)
         if len(bins) < 2:
             continue
 
@@ -326,7 +334,11 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
     for game_idx in match_durations['GameIndex']:
         match_dur = match_durations.filter(pl.col('GameIndex') == game_idx)['match_duration'][0]
 
-        bins = np.arange(0, match_dur + time_bin_size, time_bin_size)
+        # Use timer config to determine max time bin (cap at timer setting)
+        timer_value = config.get('Timer')
+        max_time = min(match_dur, timer_value) if timer_value else match_dur
+
+        bins = np.arange(0, max_time + time_bin_size, time_bin_size)
         if len(bins) < 2:
             continue
 
@@ -1120,7 +1132,11 @@ def compute_collision_time_bins_from_csvs(base_dir, time_bin_size=5):
             game_df = raw_data_df.filter(pl.col('GameIndex') == game_idx)
             match_dur = game_df['match_duration'][0]
 
-            bins = np.arange(0, match_dur + time_bin_size, time_bin_size)
+            # Use timer config to determine max time bin (cap at timer setting)
+            timer_value = config.get('Timer')
+            max_time = min(match_dur, timer_value) if timer_value else match_dur
+
+            bins = np.arange(0, max_time + time_bin_size, time_bin_size)
             if len(bins) < 2:
                 continue
 
@@ -1273,8 +1289,8 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     # Combine both sides
     all_bot_data = pl.concat(bot_stats_list)
 
-    # Compute statistics per bot per timebin
-    bot_stats_lazy = all_bot_data.group_by(['Bot', 'TimeBin']).agg([
+    # Compute statistics per bot per timebin per timer configuration
+    bot_stats_lazy = all_bot_data.group_by(['Bot', 'Timer', 'TimeBin']).agg([
         # CollisionRatio
         pl.col('CollisionRatio').min().alias('CollisionRatio_min'),
         pl.col('CollisionRatio').max().alias('CollisionRatio_max'),
@@ -1315,7 +1331,7 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
         pl.col('Velocity').max().alias('Velocity_max'),
         pl.col('Velocity').mean().alias('Velocity_mean'),
         pl.col('Velocity').std().alias('Velocity_std'),
-    ]).sort(['Bot', 'TimeBin'])
+    ]).sort(['Bot', 'Timer', 'TimeBin'])
 
     bot_stats = collect_with_gpu(bot_stats_lazy)
 

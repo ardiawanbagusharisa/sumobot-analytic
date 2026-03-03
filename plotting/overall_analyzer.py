@@ -1453,6 +1453,7 @@ def plot_pacing_factors_comparison(
 def plot_pacing_factors_per_bot(
     df,
     bot_name=None,
+    timer=None,
     width=16,
     height=10,
 ):
@@ -1462,14 +1463,26 @@ def plot_pacing_factors_per_bot(
 
     Args:
         df: DataFrame from summary_pacing_per_bot.csv with columns:
-            Bot, TimeBin, <Factor>_min, <Factor>_max, <Factor>_mean, <Factor>_std
+            Bot, Timer, TimeBin, <Factor>_min, <Factor>_max, <Factor>_mean, <Factor>_std
         bot_name: Name of bot to plot (if None, plots all bots)
+        timer: Timer configuration to filter (if None, uses all timers combined)
         width: Figure width
         height: Figure height
 
     Returns:
         Dictionary of figures by bot name
     """
+    # Filter by timer if specified
+    if timer is not None:
+        if 'Timer' not in df.columns:
+            print(f"⚠️ 'Timer' column not found in data. Cannot filter by timer={timer}")
+            print(f"   Available columns: {df.columns.tolist()}")
+        else:
+            df = df[df['Timer'] == timer]
+            if df.empty:
+                print(f"⚠️ No data found for Timer={timer}")
+                return None
+
     # Get unique bots
     bots = sorted(df['Bot'].unique())
 
@@ -1561,8 +1574,10 @@ def plot_pacing_factors_per_bot(
                 ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
 
         # Add overall title
-        fig.suptitle(f'Pacing Factors Over Time - {bot}',
-                    fontsize=16, fontweight='bold', y=0.995)
+        title = f'Pacing Factors Over Time - {bot}'
+        if timer is not None:
+            title += f' (Timer={timer}s)'
+        fig.suptitle(title, fontsize=16, fontweight='bold', y=0.995)
 
         # Add aspect labels
         fig.text(0.02, 0.75, 'THREAT ASPECT', fontsize=12, fontweight='bold',
