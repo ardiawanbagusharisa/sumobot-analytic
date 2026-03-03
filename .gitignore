@@ -11,3 +11,4 @@ result
 converted
 venv
 .venv
+.env
