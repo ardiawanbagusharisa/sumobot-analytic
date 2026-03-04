@@ -1518,6 +1518,19 @@ def plot_pacing_factors_per_bot(
             print(f"⚠️ No data for bot '{bot}'")
             continue
 
+        # If timer is None, average across all timer configurations per TimeBin
+        if timer is None and 'Timer' in bot_df.columns:
+            # Group by TimeBin and average all metrics
+            agg_dict = {}
+            for factor in all_factors:
+                for suffix in ['_mean', '_min', '_max', '_std']:
+                    col = f'{factor}{suffix}'
+                    if col in bot_df.columns:
+                        agg_dict[col] = 'mean'
+
+            bot_df = bot_df.groupby('TimeBin', as_index=False).agg(agg_dict)
+            bot_df = bot_df.sort_values('TimeBin')
+
         # Create 4x2 subplot grid (Threat top 2 rows, Tempo bottom 2 rows)
         fig, axes = plt.subplots(4, 2, figsize=(width, height))
         axes = axes.flatten()
@@ -1626,6 +1639,8 @@ def _create_pacing_data_dataframes(bot_df, all_factors, factor_info):
                 factor_label = factor_info[factor]['label']
                 mean_col = f'{factor}_mean'
                 std_col = f'{factor}_std'
+                min_col = f'{factor}_min'
+                max_col = f'{factor}_max'
 
                 if mean_col in tb_data.columns:
                     row[f'{factor_label}_Mean'] = round(tb_data[mean_col].values[0], 2)
@@ -1636,6 +1651,16 @@ def _create_pacing_data_dataframes(bot_df, all_factors, factor_info):
                     row[f'{factor_label}_Std'] = round(tb_data[std_col].values[0], 2)
                 else:
                     row[f'{factor_label}_Std'] = None
+
+                if min_col in tb_data.columns:
+                    row[f'{factor_label}_Min'] = round(tb_data[min_col].values[0], 2)
+                else:
+                    row[f'{factor_label}_Min'] = None
+
+                if max_col in tb_data.columns:
+                    row[f'{factor_label}_Max'] = round(tb_data[max_col].values[0], 2)
+                else:
+                    row[f'{factor_label}_Max'] = None
 
         per_timebin_data.append(row)
 
@@ -1665,15 +1690,17 @@ def _create_pacing_data_dataframes(bot_df, all_factors, factor_info):
         else:
             row['Overall_Std'] = None
 
-        # Overall min (min of mins across timebins)
+        # Overall min (average of mins across timebins)
+        # Note: Using mean() because bot_df may already be averaged across timer configs
         if min_col in bot_df.columns:
-            row['Overall_Min'] = round(bot_df[min_col].min(), 2)
+            row['Overall_Min'] = round(bot_df[min_col].mean(), 2)
         else:
             row['Overall_Min'] = None
 
-        # Overall max (max of maxs across timebins)
+        # Overall max (average of maxs across timebins)
+        # Note: Using mean() because bot_df may already be averaged across timer configs
         if max_col in bot_df.columns:
-            row['Overall_Max'] = round(bot_df[max_col].max(), 2)
+            row['Overall_Max'] = round(bot_df[max_col].mean(), 2)
         else:
             row['Overall_Max'] = None
 
