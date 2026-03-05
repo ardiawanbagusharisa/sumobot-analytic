@@ -313,12 +313,20 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
     return collision_fragment_list
 
 
-def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
+def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size, skip_initial=0.0):
     """
     Process pacing factors per timebin for a single CSV/Parquet file
     Calculates 8 pacing factors for both bots in each timebin:
     - Threat: CollisionRatio, AbilityRatio, Angle, SafeDistance
     - Tempo: ActionIntensity, ActionDensity, BotsDistance, Velocity
+
+    Args:
+        lf: Lazy frame of the data
+        bot_a: Name of bot A
+        bot_b: Name of bot B
+        config: Configuration dictionary
+        time_bin_size: Size of time bins in seconds
+        skip_initial: Number of seconds to skip at the start (default: 0.0)
 
     Returns list of time-binned pacing factor records (per matchup)
     """
@@ -338,7 +346,9 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         timer_value = config.get('Timer')
         max_time = min(match_dur, timer_value) if timer_value else match_dur
 
-        bins = np.arange(0, max_time + time_bin_size, time_bin_size)
+        # Apply skip_initial offset
+        start_time = skip_initial
+        bins = np.arange(start_time, max_time + time_bin_size, time_bin_size)
         if len(bins) < 2:
             continue
 
@@ -346,7 +356,8 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         action_data_lf = lf.filter(
             (pl.col("GameIndex") == game_idx) &
             (pl.col("Category") == "Action") &
-            (pl.col("State").cast(pl.Int32) != 2)  # Exclude state 2
+            (pl.col("State").cast(pl.Int32) != 2) &  # Exclude state 2
+            (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
         ).select(["Actor", "UpdatedAt", "Name"])
         action_data = collect_with_gpu(action_data_lf).to_pandas()
 
@@ -354,7 +365,8 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         collision_data_lf = lf.filter(
             (pl.col("GameIndex") == game_idx) &
             (pl.col("Category") == "Collision") &
-            (pl.col("State").cast(pl.Utf8) == "0")
+            (pl.col("State").cast(pl.Utf8) == "0") &
+            (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
         ).select([
             "Actor", "UpdatedAt", "ColTieBreaker", "ColActor",
             "BotPosX", "BotPosY", "BotRot", "BotLinv",
@@ -365,7 +377,8 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         # ===== 3. GENERAL POSITION DATA (for BotsDistance, Velocity) =====
         # Sample from all categories to get average distance/velocity
         position_data_lf = lf.filter(
-            pl.col("GameIndex") == game_idx
+            (pl.col("GameIndex") == game_idx) &
+            (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
         ).select([
             "Actor", "UpdatedAt",
             "BotPosX", "BotPosY", "BotLinv",
@@ -614,7 +627,7 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
-def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv"):
+def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0):
     """
     Process pacing factors in batches with bot filtering option
 
@@ -625,6 +638,7 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
         time_bin_size: Size of time bins for pacing factors
         bot_option: "all" for all bots, or specific bot name to filter (e.g., "BotA")
         input_format: "csv", "parquet", or "auto" to detect both
+        skip_initial: Number of seconds to skip at the start to avoid initial bias (default: 0.0)
     """
     if time_bin_size is None:
         raise ValueError("time_bin_size must be specified for pacing factor computation")
@@ -720,7 +734,7 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
 
             # Process pacing factors
             pacing_tb = process_pacing_factors_timebins_single_csv(
-                lf, bot_a, bot_b, config, time_bin_size
+                lf, bot_a, bot_b, config, time_bin_size, skip_initial=skip_initial
             )
             if pacing_tb:
                 pacing_fragment_list.extend(pacing_tb)
