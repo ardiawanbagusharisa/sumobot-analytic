@@ -1678,29 +1678,23 @@ def _create_pacing_data_dataframes(bot_df, all_factors, factor_info):
 
         row = {'Factor': factor_label}
 
-        # Overall mean (average of means across timebins)
         if mean_col in bot_df.columns:
-            row['Overall_Mean'] = round(bot_df[mean_col].mean(), 2)
+            row['Overall_Mean'] = f"{bot_df[mean_col].mean():.2f}"
         else:
             row['Overall_Mean'] = None
 
-        # Overall std (average of stds across timebins)
         if std_col in bot_df.columns:
-            row['Overall_Std'] = round(bot_df[std_col].mean(), 2)
+            row['Overall_Std'] = f"{bot_df[std_col].mean():.2f}"
         else:
             row['Overall_Std'] = None
 
-        # Overall min (average of mins across timebins)
-        # Note: Using mean() because bot_df may already be averaged across timer configs
         if min_col in bot_df.columns:
-            row['Overall_Min'] = round(bot_df[min_col].mean(), 2)
+            row['Overall_Min'] = f"{bot_df[min_col].mean():.2f}"
         else:
             row['Overall_Min'] = None
 
-        # Overall max (average of maxs across timebins)
-        # Note: Using mean() because bot_df may already be averaged across timer configs
         if max_col in bot_df.columns:
-            row['Overall_Max'] = round(bot_df[max_col].mean(), 2)
+            row['Overall_Max'] = f"{bot_df[max_col].mean():.2f}"
         else:
             row['Overall_Max'] = None
 

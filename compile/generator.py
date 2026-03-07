@@ -507,7 +507,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 'Round': config.get('Round'),
                 'SkillLeft': config.get('SkillLeft'),
                 'SkillRight': config.get('SkillRight'),
-                'TimeBin': float(time_start),
+                'TimeBin': float(time_end),  # Use end of bin instead of start
                 **factors
             })
 
