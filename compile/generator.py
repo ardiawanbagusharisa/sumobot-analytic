@@ -418,7 +418,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     total_collisions = len(collision_actor)
                     collision_ratio = float(hit_collisions / total_collisions if total_collisions > 0 else 0.0)
                 else:
-                    collision_ratio = 0.0
+                    collision_ratio = np.nan  # No collision data in this timebin
 
                 # 2. AbilityRatio: (Dash + Skills) / Total actions
                 if len(action_actor) > 0:
@@ -426,7 +426,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     total_actions = len(action_actor)
                     ability_ratio = float(ability_actions / total_actions if total_actions > 0 else 0.0)
                 else:
-                    ability_ratio = 0.0
+                    ability_ratio = np.nan  # No action data in this timebin
 
                 # 3. Angle: Average angle between bot and opponent during collisions
                 if len(collision_actor) > 0:
@@ -439,7 +439,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     angle_diff = np.minimum(angle_diff, 360 - angle_diff)  # Normalize to 0-180
                     avg_angle = float(np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else 0.0)
                 else:
-                    avg_angle = 0.0
+                    avg_angle = np.nan  # No collision data in this timebin
 
                 # 4. SafeDistance: Distance from arena edge (normalized)
                 # safedistance = abs(arena_radius - robot_distance_from_center) / arena_radius
@@ -453,12 +453,15 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     safe_distances = np.abs(arena_radius - distance_from_center) / arena_radius
                     avg_safe_distance = float(np.mean(safe_distances[~np.isnan(safe_distances)]) if len(safe_distances) > 0 else 0.0)
                 else:
-                    avg_safe_distance = 0.0
+                    avg_safe_distance = np.nan  # No collision data in this timebin
 
                 # ----- TEMPO FACTORS -----
 
                 # 5. ActionIntensity: Number of actions
-                action_intensity = float(len(action_actor))
+                if len(action_actor) > 0:
+                    action_intensity = float(len(action_actor))
+                else:
+                    action_intensity = np.nan  # No action data in this timebin
 
                 # 6. ActionDensity: Shannon entropy of action distribution
                 if len(action_actor) > 0:
@@ -466,7 +469,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     entropy = -np.sum(action_counts * np.log2(action_counts + 1e-10))
                     action_density = float(entropy)
                 else:
-                    action_density = 0.0
+                    action_density = np.nan  # No action data in this timebin
 
                 # 7. BotsDistance: Average distance between bots
                 if len(position_actor) > 0:
@@ -478,14 +481,14 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
                     avg_bots_distance = float(np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0.0)
                 else:
-                    avg_bots_distance = 0.0
+                    avg_bots_distance = np.nan  # No position data in this timebin
 
                 # 8. Velocity: Average linear velocity
                 if len(position_actor) > 0:
                     velocities = position_actor['BotLinv'].values
                     avg_velocity = float(np.mean(velocities[~np.isnan(velocities)]) if len(velocities) > 0 else 0.0)
                 else:
-                    avg_velocity = 0.0
+                    avg_velocity = np.nan  # No position data in this timebin
 
                 # Store factors with suffix
                 factors[f'CollisionRatio{bot_suffix}'] = collision_ratio
@@ -1277,7 +1280,7 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     print(f"Saved {output_dir}/summary_pacing_factors.csv")
 
     # Create per-bot statistics (min, max, mean, std for constraint setting)
-    print(" Creating per-bot pacing statistics...")
+    print(" Creating per-bot per-timebin pacing statistics for constraint setting...")
 
     # Transform to per-bot format
     bot_stats_list = []
@@ -1285,8 +1288,7 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     for bot_side, suffix in [('Bot_L', '_L'), ('Bot_R', '_R')]:
         bot_data = pacing_factors_df.lazy().select([
             pl.col(bot_side).alias('Bot'),
-            pl.col('GameIndex'),  # Keep GameIndex for per-game aggregation
-            pl.col('TimeBin'),
+            pl.col('TimeBin'),  # Include TimeBin for per-segment stats
             pl.col('Timer'),
             pl.col('ActInterval'),
             pl.col('Round'),
@@ -1304,153 +1306,64 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     # Combine both sides
     all_bot_data = pl.concat(bot_stats_list)
 
-    # ========== APPROACH A: Per-TimeBin Aggregation (for plotting over time) ==========
-    print("   - Per-timebin aggregation (for visualization)...")
-    per_timebin_stats = all_bot_data.group_by(['Bot', 'Timer', 'TimeBin']).agg([
-        # CollisionRatio
-        pl.col('CollisionRatio').min().alias('CollisionRatio_min'),
+    # Compute statistics per bot per timebin per timer configuration
+    # For min: use average of lowest 5% values (NaN values are automatically excluded)
+    # Note: NaN marks missing data (no events in that timebin), Polars skips them automatically
+    bot_stats_lazy = all_bot_data.group_by(['Bot', 'Timer', 'TimeBin']).agg([
+        # CollisionRatio - filter zeros (legitimate value), NaN auto-excluded
+        pl.col('CollisionRatio').filter(pl.col('CollisionRatio') > 0).sort().head(pl.len() // 20 + 1).mean().alias('CollisionRatio_min'),
         pl.col('CollisionRatio').max().alias('CollisionRatio_max'),
         pl.col('CollisionRatio').mean().alias('CollisionRatio_mean'),
         pl.col('CollisionRatio').std().alias('CollisionRatio_std'),
-        # AbilityRatio
-        pl.col('AbilityRatio').min().alias('AbilityRatio_min'),
+        # AbilityRatio - filter zeros (legitimate value), NaN auto-excluded
+        pl.col('AbilityRatio').filter(pl.col('AbilityRatio') > 0).sort().head(pl.len() // 20 + 1).mean().alias('AbilityRatio_min'),
         pl.col('AbilityRatio').max().alias('AbilityRatio_max'),
         pl.col('AbilityRatio').mean().alias('AbilityRatio_mean'),
         pl.col('AbilityRatio').std().alias('AbilityRatio_std'),
-        # Angle
+        # Angle - NaN auto-excluded (no zero filtering needed)
         pl.col('Angle').min().alias('Angle_min'),
         pl.col('Angle').max().alias('Angle_max'),
         pl.col('Angle').mean().alias('Angle_mean'),
         pl.col('Angle').std().alias('Angle_std'),
-        # SafeDistance
+        # SafeDistance - NaN auto-excluded (no zero filtering needed)
         pl.col('SafeDistance').min().alias('SafeDistance_min'),
         pl.col('SafeDistance').max().alias('SafeDistance_max'),
         pl.col('SafeDistance').mean().alias('SafeDistance_mean'),
         pl.col('SafeDistance').std().alias('SafeDistance_std'),
-        # ActionIntensity
-        pl.col('ActionIntensity').min().alias('ActionIntensity_min'),
+        # ActionIntensity - NaN auto-excluded (count can be 0 legitimately)
+        pl.col('ActionIntensity').sort().head(pl.len() // 20 + 1).mean().alias('ActionIntensity_min'),
         pl.col('ActionIntensity').max().alias('ActionIntensity_max'),
         pl.col('ActionIntensity').mean().alias('ActionIntensity_mean'),
         pl.col('ActionIntensity').std().alias('ActionIntensity_std'),
-        # ActionDensity
-        pl.col('ActionDensity').min().alias('ActionDensity_min'),
+        # ActionDensity - filter zeros (legitimate value), NaN auto-excluded
+        pl.col('ActionDensity').filter(pl.col('ActionDensity') > 0).sort().head(pl.len() // 20 + 1).mean().alias('ActionDensity_min'),
         pl.col('ActionDensity').max().alias('ActionDensity_max'),
         pl.col('ActionDensity').mean().alias('ActionDensity_mean'),
         pl.col('ActionDensity').std().alias('ActionDensity_std'),
-        # BotsDistance
+        # BotsDistance - NaN auto-excluded (no zero filtering needed, distance never truly 0)
+        # pl.col('BotsDistance').sort().head(pl.len() // 20 + 1).mean().alias('BotsDistance_min'),
         pl.col('BotsDistance').min().alias('BotsDistance_min'),
         pl.col('BotsDistance').max().alias('BotsDistance_max'),
         pl.col('BotsDistance').mean().alias('BotsDistance_mean'),
         pl.col('BotsDistance').std().alias('BotsDistance_std'),
-        # Velocity
+        # Velocity - NaN auto-excluded (zero velocity is legitimate)
+        # pl.col('Velocity').sort().head(pl.len() // 20 + 1).mean().alias('Velocity_min'),
         pl.col('Velocity').min().alias('Velocity_min'),
         pl.col('Velocity').max().alias('Velocity_max'),
         pl.col('Velocity').mean().alias('Velocity_mean'),
         pl.col('Velocity').std().alias('Velocity_std'),
     ]).sort(['Bot', 'Timer', 'TimeBin'])
 
-    per_timebin_stats_df = collect_with_gpu(per_timebin_stats)
-    per_timebin_stats_df.write_csv(f"{output_dir}/summary_pacing_per_bot_timebin.csv")
-    print(f"   Saved {output_dir}/summary_pacing_per_bot_timebin.csv")
-    print(f"     Use this file for plotting pacing factors over time")
+    bot_stats = collect_with_gpu(bot_stats_lazy)
 
-    # ========== APPROACH B: Per-Game Aggregation (for pacing constraints) ==========
-    print("   - Per-game aggregation (for pacing constraints)...")
-    per_game_stats = all_bot_data.group_by(['Bot', 'Timer', 'GameIndex']).agg([
-        # CollisionRatio
-        pl.col('CollisionRatio').min().alias('CollisionRatio_min'),
-        pl.col('CollisionRatio').max().alias('CollisionRatio_max'),
-        pl.col('CollisionRatio').mean().alias('CollisionRatio_mean'),
-        pl.col('CollisionRatio').std().alias('CollisionRatio_std'),
-        # AbilityRatio
-        pl.col('AbilityRatio').min().alias('AbilityRatio_min'),
-        pl.col('AbilityRatio').max().alias('AbilityRatio_max'),
-        pl.col('AbilityRatio').mean().alias('AbilityRatio_mean'),
-        pl.col('AbilityRatio').std().alias('AbilityRatio_std'),
-        # Angle
-        pl.col('Angle').min().alias('Angle_min'),
-        pl.col('Angle').max().alias('Angle_max'),
-        pl.col('Angle').mean().alias('Angle_mean'),
-        pl.col('Angle').std().alias('Angle_std'),
-        # SafeDistance
-        pl.col('SafeDistance').min().alias('SafeDistance_min'),
-        pl.col('SafeDistance').max().alias('SafeDistance_max'),
-        pl.col('SafeDistance').mean().alias('SafeDistance_mean'),
-        pl.col('SafeDistance').std().alias('SafeDistance_std'),
-        # ActionIntensity
-        pl.col('ActionIntensity').min().alias('ActionIntensity_min'),
-        pl.col('ActionIntensity').max().alias('ActionIntensity_max'),
-        pl.col('ActionIntensity').mean().alias('ActionIntensity_mean'),
-        pl.col('ActionIntensity').std().alias('ActionIntensity_std'),
-        # ActionDensity
-        pl.col('ActionDensity').min().alias('ActionDensity_min'),
-        pl.col('ActionDensity').max().alias('ActionDensity_max'),
-        pl.col('ActionDensity').mean().alias('ActionDensity_mean'),
-        pl.col('ActionDensity').std().alias('ActionDensity_std'),
-        # BotsDistance
-        pl.col('BotsDistance').min().alias('BotsDistance_min'),
-        pl.col('BotsDistance').max().alias('BotsDistance_max'),
-        pl.col('BotsDistance').mean().alias('BotsDistance_mean'),
-        pl.col('BotsDistance').std().alias('BotsDistance_std'),
-        # Velocity
-        pl.col('Velocity').min().alias('Velocity_min'),
-        pl.col('Velocity').max().alias('Velocity_max'),
-        pl.col('Velocity').mean().alias('Velocity_mean'),
-        pl.col('Velocity').std().alias('Velocity_std'),
-    ])
+    # Save per-bot per-timebin statistics
+    bot_stats.write_csv(f"{output_dir}/summary_pacing_per_bot.csv")
+    print(f"Saved {output_dir}/summary_pacing_per_bot.csv")
+    print(f"  Use this file to set constraint ranges (min, max) for each bot per timebin segment")
 
-    # STEP 2: Aggregate across games (average the per-game statistics)
-    # Group by Bot, Timer (average across all games)
-    bot_stats_lazy = per_game_stats.group_by(['Bot', 'Timer']).agg([
-        # CollisionRatio - average of per-game statistics
-        pl.col('CollisionRatio_min').mean().alias('CollisionRatio_min'),
-        pl.col('CollisionRatio_max').mean().alias('CollisionRatio_max'),
-        pl.col('CollisionRatio_mean').mean().alias('CollisionRatio_mean'),
-        pl.col('CollisionRatio_std').mean().alias('CollisionRatio_std'),
-        # AbilityRatio
-        pl.col('AbilityRatio_min').mean().alias('AbilityRatio_min'),
-        pl.col('AbilityRatio_max').mean().alias('AbilityRatio_max'),
-        pl.col('AbilityRatio_mean').mean().alias('AbilityRatio_mean'),
-        pl.col('AbilityRatio_std').mean().alias('AbilityRatio_std'),
-        # Angle
-        pl.col('Angle_min').mean().alias('Angle_min'),
-        pl.col('Angle_max').mean().alias('Angle_max'),
-        pl.col('Angle_mean').mean().alias('Angle_mean'),
-        pl.col('Angle_std').mean().alias('Angle_std'),
-        # SafeDistance
-        pl.col('SafeDistance_min').mean().alias('SafeDistance_min'),
-        pl.col('SafeDistance_max').mean().alias('SafeDistance_max'),
-        pl.col('SafeDistance_mean').mean().alias('SafeDistance_mean'),
-        pl.col('SafeDistance_std').mean().alias('SafeDistance_std'),
-        # ActionIntensity
-        pl.col('ActionIntensity_min').mean().alias('ActionIntensity_min'),
-        pl.col('ActionIntensity_max').mean().alias('ActionIntensity_max'),
-        pl.col('ActionIntensity_mean').mean().alias('ActionIntensity_mean'),
-        pl.col('ActionIntensity_std').mean().alias('ActionIntensity_std'),
-        # ActionDensity
-        pl.col('ActionDensity_min').mean().alias('ActionDensity_min'),
-        pl.col('ActionDensity_max').mean().alias('ActionDensity_max'),
-        pl.col('ActionDensity_mean').mean().alias('ActionDensity_mean'),
-        pl.col('ActionDensity_std').mean().alias('ActionDensity_std'),
-        # BotsDistance
-        pl.col('BotsDistance_min').mean().alias('BotsDistance_min'),
-        pl.col('BotsDistance_max').mean().alias('BotsDistance_max'),
-        pl.col('BotsDistance_mean').mean().alias('BotsDistance_mean'),
-        pl.col('BotsDistance_std').mean().alias('BotsDistance_std'),
-        # Velocity
-        pl.col('Velocity_min').mean().alias('Velocity_min'),
-        pl.col('Velocity_max').mean().alias('Velocity_max'),
-        pl.col('Velocity_mean').mean().alias('Velocity_mean'),
-        pl.col('Velocity_std').mean().alias('Velocity_std'),
-    ]).sort(['Bot', 'Timer'])
+    return summary, bot_stats
 
-    per_game_stats_df = collect_with_gpu(bot_stats_lazy)
-    per_game_stats_df.write_csv(f"{output_dir}/summary_pacing_per_bot_game.csv")
-    print(f"   Saved {output_dir}/summary_pacing_per_bot_game.csv")
-    print(f"     Use this file for setting pacing constraints (per-game aggregation)")
 
-    # Return both for backward compatibility (keep timebin version as default)
-    return summary, per_timebin_stats_df
 
 
 def generate(checkpoint_dir, output_dir):
