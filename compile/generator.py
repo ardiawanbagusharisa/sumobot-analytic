@@ -1307,14 +1307,13 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     all_bot_data = pl.concat(bot_stats_list)
 
     # Compute statistics per bot per timebin per timer configuration
-    # Filter > 0 for all factors and all statistics (NaN values are automatically excluded)
-    # Note: NaN marks missing data (no events in that timebin), Polars skips them automatically
+    # Filter out NaN values but keep zeros (NaN marks missing data, zero is a valid value)
     factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance',
                'ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
 
     agg_exprs = []
     for factor in factors:
-        filtered = pl.col(factor).filter(pl.col(factor) > 0)
+        filtered = pl.col(factor).filter(pl.col(factor).is_not_nan())
         agg_exprs.extend([
             filtered.min().alias(f'{factor}_min'),
             filtered.max().alias(f'{factor}_max'),
