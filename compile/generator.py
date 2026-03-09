@@ -1013,7 +1013,7 @@ def create_summary_bot(matchup_summary, output_dir):
     return bot_summary
 
 
-def generate_timebins_from_batches(checkpoint_dir, output_dir):
+def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_percentile = 5):
     """
     Generate timebin summaries from batched timebin checkpoints
     Loads batch files and creates final summaries
@@ -1083,7 +1083,7 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir):
         print(f"Loaded {len(pacing_factors_df):,} pacing factor records")
 
         print("\n Creating pacing factors summary...")
-        summarize_pacing_factors(pacing_factors_df, output_dir)
+        summarize_pacing_factors(pacing_factors_df, output_dir, pacing_ratio_percentile)
 
     print("\n" + "=" * 60)
     print("🎉 Done! Created:")
@@ -1240,7 +1240,7 @@ def summarize_collision_timebins(collision_fragment_df, output_dir):
     return summary
 
 
-def summarize_pacing_factors(pacing_factors_df, output_dir):
+def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5):
     """
     Summarize pacing factors with GPU acceleration.
     Computes mean and std for each factor per bot/config/timebin.
@@ -1307,12 +1307,25 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     all_bot_data = pl.concat(bot_stats_list)
 
     # Compute statistics per bot per timebin per timer configuration
-    # Filter out NaN values but keep zeros (NaN marks missing data, zero is a valid value)
-    factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance',
-               'ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
+    # For some factors, use average of lowest 5% (excluding zero) for min
+    # For others, use regular min (excluding NaN only)
+    factors_exclude_zero = ['CollisionRatio', 'AbilityRatio', 'ActionIntensity', 'ActionDensity']
+    factors_regular = ['Angle', 'SafeDistance', 'BotsDistance', 'Velocity']
 
     agg_exprs = []
-    for factor in factors:
+
+    # Factors that exclude zero and use 5% lowest average for min
+    for factor in factors_exclude_zero:
+        filtered = pl.col(factor).filter(pl.col(factor) > 0)
+        agg_exprs.extend([
+            filtered.sort().head(pl.len() // (100 // ratio_percentile) + 1).mean().alias(f'{factor}_min'),
+            filtered.max().alias(f'{factor}_max'),
+            filtered.mean().alias(f'{factor}_mean'),
+            filtered.std().alias(f'{factor}_std'),
+        ])
+
+    # Factors that keep zeros and use regular min
+    for factor in factors_regular:
         filtered = pl.col(factor).filter(pl.col(factor).is_not_nan())
         agg_exprs.extend([
             filtered.min().alias(f'{factor}_min'),
