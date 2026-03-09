@@ -1307,52 +1307,22 @@ def summarize_pacing_factors(pacing_factors_df, output_dir):
     all_bot_data = pl.concat(bot_stats_list)
 
     # Compute statistics per bot per timebin per timer configuration
-    # For min: use average of lowest 5% values (NaN values are automatically excluded)
+    # Filter > 0 for all factors and all statistics (NaN values are automatically excluded)
     # Note: NaN marks missing data (no events in that timebin), Polars skips them automatically
-    bot_stats_lazy = all_bot_data.group_by(['Bot', 'Timer', 'TimeBin']).agg([
-        # CollisionRatio - filter zeros (legitimate value), NaN auto-excluded
-        pl.col('CollisionRatio').filter(pl.col('CollisionRatio') > 0).sort().head(pl.len() // 20 + 1).mean().alias('CollisionRatio_min'),
-        pl.col('CollisionRatio').max().alias('CollisionRatio_max'),
-        pl.col('CollisionRatio').mean().alias('CollisionRatio_mean'),
-        pl.col('CollisionRatio').std().alias('CollisionRatio_std'),
-        # AbilityRatio - filter zeros (legitimate value), NaN auto-excluded
-        pl.col('AbilityRatio').filter(pl.col('AbilityRatio') > 0).sort().head(pl.len() // 20 + 1).mean().alias('AbilityRatio_min'),
-        pl.col('AbilityRatio').max().alias('AbilityRatio_max'),
-        pl.col('AbilityRatio').mean().alias('AbilityRatio_mean'),
-        pl.col('AbilityRatio').std().alias('AbilityRatio_std'),
-        # Angle - NaN auto-excluded (no zero filtering needed)
-        pl.col('Angle').min().alias('Angle_min'),
-        pl.col('Angle').max().alias('Angle_max'),
-        pl.col('Angle').mean().alias('Angle_mean'),
-        pl.col('Angle').std().alias('Angle_std'),
-        # SafeDistance - NaN auto-excluded (no zero filtering needed)
-        pl.col('SafeDistance').min().alias('SafeDistance_min'),
-        pl.col('SafeDistance').max().alias('SafeDistance_max'),
-        pl.col('SafeDistance').mean().alias('SafeDistance_mean'),
-        pl.col('SafeDistance').std().alias('SafeDistance_std'),
-        # ActionIntensity - NaN auto-excluded (count can be 0 legitimately)
-        pl.col('ActionIntensity').sort().head(pl.len() // 20 + 1).mean().alias('ActionIntensity_min'),
-        pl.col('ActionIntensity').max().alias('ActionIntensity_max'),
-        pl.col('ActionIntensity').mean().alias('ActionIntensity_mean'),
-        pl.col('ActionIntensity').std().alias('ActionIntensity_std'),
-        # ActionDensity - filter zeros (legitimate value), NaN auto-excluded
-        pl.col('ActionDensity').filter(pl.col('ActionDensity') > 0).sort().head(pl.len() // 20 + 1).mean().alias('ActionDensity_min'),
-        pl.col('ActionDensity').max().alias('ActionDensity_max'),
-        pl.col('ActionDensity').mean().alias('ActionDensity_mean'),
-        pl.col('ActionDensity').std().alias('ActionDensity_std'),
-        # BotsDistance - NaN auto-excluded (no zero filtering needed, distance never truly 0)
-        # pl.col('BotsDistance').sort().head(pl.len() // 20 + 1).mean().alias('BotsDistance_min'),
-        pl.col('BotsDistance').min().alias('BotsDistance_min'),
-        pl.col('BotsDistance').max().alias('BotsDistance_max'),
-        pl.col('BotsDistance').mean().alias('BotsDistance_mean'),
-        pl.col('BotsDistance').std().alias('BotsDistance_std'),
-        # Velocity - NaN auto-excluded (zero velocity is legitimate)
-        # pl.col('Velocity').sort().head(pl.len() // 20 + 1).mean().alias('Velocity_min'),
-        pl.col('Velocity').min().alias('Velocity_min'),
-        pl.col('Velocity').max().alias('Velocity_max'),
-        pl.col('Velocity').mean().alias('Velocity_mean'),
-        pl.col('Velocity').std().alias('Velocity_std'),
-    ]).sort(['Bot', 'Timer', 'TimeBin'])
+    factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance',
+               'ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
+
+    agg_exprs = []
+    for factor in factors:
+        filtered = pl.col(factor).filter(pl.col(factor) > 0)
+        agg_exprs.extend([
+            filtered.min().alias(f'{factor}_min'),
+            filtered.max().alias(f'{factor}_max'),
+            filtered.mean().alias(f'{factor}_mean'),
+            filtered.std().alias(f'{factor}_std'),
+        ])
+
+    bot_stats_lazy = all_bot_data.group_by(['Bot', 'Timer', 'TimeBin']).agg(agg_exprs).sort(['Bot', 'Timer', 'TimeBin'])
 
     bot_stats = collect_with_gpu(bot_stats_lazy)
 
