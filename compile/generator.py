@@ -416,7 +416,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                         (collision_actor['ColActor'] == True)
                     ])
                     total_collisions = len(collision_actor)
-                    collision_ratio = float(hit_collisions / total_collisions if total_collisions > 0 else 0.0)
+                    collision_ratio = float(hit_collisions / total_collisions if total_collisions > 0 else np.nan)
                 else:
                     collision_ratio = np.nan  # No collision data in this timebin
 
@@ -424,7 +424,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 if len(action_actor) > 0:
                     ability_actions = len(action_actor[action_actor['Name'].isin(['Dash', 'SkillBoost', 'SkillStone'])])
                     total_actions = len(action_actor)
-                    ability_ratio = float(ability_actions / total_actions if total_actions > 0 else 0.0)
+                    ability_ratio = float(ability_actions / total_actions if total_actions > 0 else np.nan)
                 else:
                     ability_ratio = np.nan  # No action data in this timebin
 
@@ -437,21 +437,21 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     # Angle difference (absolute, normalized to 0-180)
                     angle_diff = np.abs(bot_rot - enemy_rot)
                     angle_diff = np.minimum(angle_diff, 360 - angle_diff)  # Normalize to 0-180
-                    avg_angle = float(np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else 0.0)
+                    avg_angle = float(np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else np.nan)
                 else:
                     avg_angle = np.nan  # No collision data in this timebin
 
                 # 4. SafeDistance: Distance from arena edge (normalized)
                 # safedistance = abs(arena_radius - robot_distance_from_center) / arena_radius
-                if len(collision_actor) > 0:
-                    bot_x = collision_actor['BotPosX'].values
-                    bot_y = collision_actor['BotPosY'].values
+                if len(position_actor) > 0:
+                    bot_x = position_actor['BotPosX'].values
+                    bot_y = position_actor['BotPosY'].values
 
                     # Calculate distance from arena center
                     distance_from_center = np.sqrt((bot_x - arena_center[0])**2 + (bot_y - arena_center[1])**2)
                     # Calculate normalized distance from edge
                     safe_distances = np.abs(arena_radius - distance_from_center) / arena_radius
-                    avg_safe_distance = float(np.mean(safe_distances[~np.isnan(safe_distances)]) if len(safe_distances) > 0 else 0.0)
+                    avg_safe_distance = float(np.mean(safe_distances[~np.isnan(safe_distances)]) if len(safe_distances) > 0 else np.nan)
                 else:
                     avg_safe_distance = np.nan  # No collision data in this timebin
 
@@ -479,14 +479,14 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     enemy_y = position_actor['EnemyBotPosY'].values
 
                     distances = np.sqrt((bot_x - enemy_x)**2 + (bot_y - enemy_y)**2)
-                    avg_bots_distance = float(np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else 0.0)
+                    avg_bots_distance = float(np.mean(distances[~np.isnan(distances)]) if len(distances) > 0 else np.nan)
                 else:
                     avg_bots_distance = np.nan  # No position data in this timebin
 
                 # 8. Velocity: Average linear velocity
                 if len(position_actor) > 0:
                     velocities = position_actor['BotLinv'].values
-                    avg_velocity = float(np.mean(velocities[~np.isnan(velocities)]) if len(velocities) > 0 else 0.0)
+                    avg_velocity = float(np.mean(velocities[~np.isnan(velocities)]) if len(velocities) > 0 else np.nan)
                 else:
                     avg_velocity = np.nan  # No position data in this timebin
 
@@ -1316,7 +1316,7 @@ def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5
 
     # Factors that exclude zero and use 5% lowest average for min
     for factor in factors_exclude_zero:
-        filtered = pl.col(factor).filter(pl.col(factor).is_not_nan())
+        filtered = pl.col(factor).filter((pl.col(factor).is_not_nan()) & (pl.col(factor) > 0))
         agg_exprs.extend([
             filtered.sort().head(pl.len() // (100 // ratio_percentile) + 1).mean().alias(f'{factor}_min'),
             filtered.max().alias(f'{factor}_max'),
