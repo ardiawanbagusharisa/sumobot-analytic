@@ -1308,27 +1308,15 @@ def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5
 
     # Compute statistics per bot per timebin per timer configuration
     # For some factors, use average of lowest 5% (excluding zero) for min
-    # For others, use regular min (excluding NaN only)
-    factors_exclude_zero = ['CollisionRatio', 'AbilityRatio', 'ActionIntensity', 'ActionDensity']
-    factors_regular = ['Angle', 'SafeDistance', 'BotsDistance', 'Velocity']
+    factors = ['CollisionRatio', 'AbilityRatio', 'ActionIntensity', 'ActionDensity', 'Angle', 'SafeDistance', 'BotsDistance', 'Velocity']
 
     agg_exprs = []
 
     # Factors that exclude zero and use 5% lowest average for min
-    for factor in factors_exclude_zero:
+    for factor in factors:
         filtered = pl.col(factor).filter((pl.col(factor).is_not_nan()) & (pl.col(factor) > 0))
         agg_exprs.extend([
             filtered.sort().head(pl.len() // (100 // ratio_percentile) + 1).mean().alias(f'{factor}_min'),
-            filtered.max().alias(f'{factor}_max'),
-            filtered.mean().alias(f'{factor}_mean'),
-            filtered.std().alias(f'{factor}_std'),
-        ])
-
-    # Factors that keep zeros and use regular min
-    for factor in factors_regular:
-        filtered = pl.col(factor).filter(pl.col(factor).is_not_nan())
-        agg_exprs.extend([
-            filtered.min().alias(f'{factor}_min'),
             filtered.max().alias(f'{factor}_max'),
             filtered.mean().alias(f'{factor}_mean'),
             filtered.std().alias(f'{factor}_std'),
