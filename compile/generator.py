@@ -1312,12 +1312,12 @@ def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5
 
     agg_exprs = []
 
-    # Factors that exclude zero and use 5% lowest average for min
+    # Factors that exclude zero and use 5% lowest average for min and 5% highest average for max
     for factor in factors:
         filtered = pl.col(factor).filter((pl.col(factor).is_not_nan()) & (pl.col(factor) > 0))
         agg_exprs.extend([
             filtered.sort().head(pl.len() // (100 // ratio_percentile) + 1).mean().alias(f'{factor}_min'),
-            filtered.max().alias(f'{factor}_max'),
+            filtered.sort(descending=True).head(pl.len() // (100 // ratio_percentile) + 1).mean().alias(f'{factor}_max'),
             filtered.mean().alias(f'{factor}_mean'),
             filtered.std().alias(f'{factor}_std'),
         ])
