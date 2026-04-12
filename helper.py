@@ -2,7 +2,7 @@ import os
 import polars as pl
 
 
-def count_games_in_folder(root_folder: str, target_games: int = None):
+def count_games_in_folder(root_folder: str, target_configs: int = None, target_games: int = None):
     """
     Count unique games in each parquet file within the folder structure.
 
@@ -14,8 +14,10 @@ def count_games_in_folder(root_folder: str, target_games: int = None):
 
     Args:
         root_folder: Path to the root folder containing bot matchup folders
-        target_games: Target number of games to reach. If provided, will show
-                      green checkmark (✅) if reached, red cross (❌) if not.
+        target_configs: Target number of configs expected per bot matchup. If provided,
+                        will show REACH/NOT REACH for config count.
+        target_games: Target number of games to reach per config. If provided, will show
+                      REACH/NOT REACH for each config's game count.
     """
     # Find all bot vs bot folders
     bot_folders = sorted([
@@ -24,7 +26,6 @@ def count_games_in_folder(root_folder: str, target_games: int = None):
     ])
 
     for bot_folder in bot_folders:
-        print(f"\n{bot_folder}:")
         bot_path = os.path.join(root_folder, bot_folder)
 
         # Find all Timer_* configuration folders
@@ -33,6 +34,17 @@ def count_games_in_folder(root_folder: str, target_games: int = None):
             if os.path.isdir(os.path.join(bot_path, d)) and d.startswith("Timer_")
         ])
 
+        # Count total configs
+        total_configs = len(config_folders)
+
+        # Print bot folder header with config count status
+        if target_configs is not None:
+            config_status = "REACH" if total_configs >= target_configs else "CONFIG NOT REACH"
+            print(f"\n{bot_folder} ({total_configs}/{target_configs} configs - {config_status}):")
+        else:
+            print(f"\n{bot_folder} ({total_configs} configs):")
+
+        # Second pass: print details for each config
         for config_folder in config_folders:
             config_path = os.path.join(bot_path, config_folder)
             parquet_file = os.path.join(config_path, f"{config_folder}.parquet")
@@ -44,8 +56,8 @@ def count_games_in_folder(root_folder: str, target_games: int = None):
 
                 # Add emoji indicator if target is provided
                 if target_games is not None:
-                    emoji = "✅" if n_games >= target_games else "❌"
-                    print(f"  {emoji} {config_folder}: {n_games} games")
+                    emoji = "(REACH)" if n_games >= target_games else f"(GAME NOT REACH)"
+                    print(f"  {config_folder}: {n_games} games - {emoji}")
                 else:
                     print(f"  - {config_folder}: {n_games} games")
             else:
@@ -56,11 +68,12 @@ def count_games_in_folder(root_folder: str, target_games: int = None):
 if __name__ == "__main__":
     # Default path - adjust as needed
     root_folder = "converted"
-    target_games = 4  # Default target, adjust as needed
+    target_configs = 5  # Default target configs per bot matchup
+    target_games = 3  # Default target games per config
 
     # Check if the folder exists
     if not os.path.isdir(root_folder):
         print(f"Error: Folder not found: {root_folder}")
         print("Please provide the correct path to the data folder.")
     else:
-        count_games_in_folder(root_folder, target_games=target_games)
+        count_games_in_folder(root_folder, target_configs=target_configs, target_games=target_games)
