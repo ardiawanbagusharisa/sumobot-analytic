@@ -10,5 +10,6 @@ arena_heatmaps
 result
 converted
 venv
+locals
 .venv
 .env
