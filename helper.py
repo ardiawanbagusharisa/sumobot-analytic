@@ -358,12 +358,12 @@ if __name__ == "__main__":
 
         # Configuration - Use full simulation config
         config = {
-            "Timer": [15.0, 45.0, 60.0],
+            "Timer": [15.0, 30, 45.0, 60.0],
             "ActInterval": [0.1, 0.2, 0.5],
             "Round": ["BestOf1", "BestOf3", "BestOf5"],
             "SkillLeft": ["Boost", "Stone"],
             "SkillRight": ["Boost", "Stone"],
-            "Bots": ["Bot_BT", "Bot_DQN", "Bot_GA", "Bot_ML_Classification", "Bot_NN", "Bot_PPO"],
+            "Bots": ["Bot_BT", "Bot_DQN","Bot_FSM","Bot_FuzzyLogic", "Bot_GA","Bot_LLM_ActionGPT","Bot_MCTS", "Bot_ML_Classification", "Bot_NN", "Bot_PPO","Bot_Primitive","Bot_SLM_ActionGPT","Bot_UtilityAI"],
         }
 
         print("Configuration:")
@@ -454,7 +454,10 @@ if __name__ == "__main__":
             print()
 
         # Step 2: Find missing configs using generated mapping
-        output_file = "missing_configs.txt"
+        output_dir = "locals"
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_file = f"{output_dir}/missing_configs.txt"
 
         print("="*80)
         print("STEP 2: Comparing with expected configs")
