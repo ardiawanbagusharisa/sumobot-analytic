@@ -1558,7 +1558,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     print(f"✅ Completed! Distance distribution plots saved in bot folders")
     print("=" * 60)
 
-def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto"):
+def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None):
     """
     Create heatmaps and position distribution plots for all bots in the simulation directory
     Saves individual phase/timer images for each bot
@@ -1575,10 +1575,17 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         include_distance_over_time: If True, also generate distance over time plot (default: True)
         skip_initial: Skip initial N seconds of data to remove spawn point bias (default: 0.0)
         input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
+        filter_bots: Optional list of bot names to process (e.g., ["Bot_BT", "Bot_GA"]). If None, process all bots.
+        filter_matchups: Optional list of matchup names to process (e.g., ["Bot_BT_vs_Bot_GA"]). If None, process all matchups.
     """
     # Find all unique bot names from matchup folders
     matchup_folders = [f for f in os.listdir(base_dir)
                       if os.path.isdir(os.path.join(base_dir, f)) and "_vs_" in f]
+
+    # Apply matchup filter if specified
+    if filter_matchups:
+        matchup_folders = [m for m in matchup_folders if m in filter_matchups]
+        print(f"Filtering to {len(matchup_folders)} matchups: {filter_matchups}")
 
     bot_names = set()
     for matchup in matchup_folders:
@@ -1588,7 +1595,17 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             bot_names.add(parts[1])
 
     bot_names = sorted(bot_names)
-    print(f"Found {len(bot_names)} unique bots: {bot_names}")
+
+    # Apply bot filter if specified
+    if filter_bots:
+        bot_names = [b for b in bot_names if b in filter_bots]
+        print(f"Filtering to {len(bot_names)} bots: {bot_names}")
+    else:
+        print(f"Found {len(bot_names)} unique bots: {bot_names}")
+
+    if not bot_names:
+        print("No bots to process after filtering!")
+        return
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
