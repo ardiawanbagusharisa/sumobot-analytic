@@ -539,7 +539,7 @@ if __name__ == "__main__":
 
     elif len(sys.argv) > 1 and sys.argv[1] == "find-missing":
         # Find ALL missing config indices (both incomplete and completely missing)
-        res_file = "locals/res.txt"
+        res_file = "locals/games_count.txt"
         mapping_file = "locals/config_index_mapping.txt"
         output_file = "locals/missing_configs.txt"
 
@@ -553,9 +553,13 @@ if __name__ == "__main__":
         find_all_missing_configs(res_file, mapping_file=mapping_file, output_file=output_file)
     else:
         # Default: count games in folder
-        root_folder = "converted"
-        target_configs = 5  # Default target configs per bot matchup
-        target_games = 3  # Default target games per config
+        from dotenv import load_dotenv
+
+        # Load .env configuration
+        load_dotenv()
+        root_folder = os.getenv("CONVERT_TARGET_DIR", "converted")
+        target_configs = 144  # Default target configs per bot matchup
+        target_games = 50  # Default target games per config
 
         # Check if the folder exists
         if not os.path.isdir(root_folder):
