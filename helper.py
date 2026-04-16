@@ -358,7 +358,7 @@ if __name__ == "__main__":
 
         # Configuration - Use full simulation config
         config = {
-            "Timer": [15.0, 30, 45.0, 60.0],
+            "Timer": [15, 30, 45, 60],
             "ActInterval": [0.1, 0.2, 0.5],
             "Round": ["BestOf1", "BestOf3", "BestOf5"],
             "SkillLeft": ["Boost", "Stone"],
@@ -524,12 +524,77 @@ if __name__ == "__main__":
             output_lines.append("Note: This range may include configs that are complete.")
             output_lines.append("For precise re-run, use individual indices or run in smaller batches.")
 
-        # Output to file
+        # Output missing_configs.txt
         output_text = "\n".join(output_lines)
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(output_text)
 
         print(f"Results written to: {output_file}")
+
+        # Step 3: Output games_count.txt for debugging
+        print()
+        print("="*80)
+        print("STEP 3: Generating debug files")
+        print("="*80)
+        print()
+
+        games_count_file = f"{output_dir}/games_count.txt"
+        games_count_lines = []
+        games_count_lines.append("=" * 80)
+        games_count_lines.append("GAMES COUNT (All Scanned Configs)")
+        games_count_lines.append("=" * 80)
+        games_count_lines.append("")
+
+        if existing_configs:
+            # Group by bot matchup
+            from collections import defaultdict
+            by_matchup = defaultdict(list)
+            for (bot_matchup, config_name), n_games in existing_configs.items():
+                by_matchup[bot_matchup].append((config_name, n_games))
+
+            # Sort matchups
+            for bot_matchup in sorted(by_matchup.keys()):
+                configs = by_matchup[bot_matchup]
+                total_configs = len(configs)
+                complete_configs = sum(1 for _, n in configs if n >= target_games)
+
+                status = "COMPLETE" if complete_configs == total_configs else "INCOMPLETE"
+                games_count_lines.append(f"{bot_matchup} ({complete_configs}/{total_configs} configs - {status}):")
+
+                # Sort configs by name
+                for config_name, n_games in sorted(configs):
+                    config_status = "COMPLETE" if n_games >= target_games else "INCOMPLETE"
+                    games_count_lines.append(f"  {config_name}: {n_games} games - ({config_status})")
+
+                games_count_lines.append("")
+        else:
+            games_count_lines.append("No existing configs found (polars may not be installed)")
+
+        with open(games_count_file, 'w', encoding='utf-8') as f:
+            f.write("\n".join(games_count_lines))
+
+        print(f"Games count written to: {games_count_file}")
+
+        # Step 4: Output config_index_mapping.txt for debugging
+        mapping_file = f"{output_dir}/config_index_mapping.txt"
+        mapping_lines = []
+        mapping_lines.append("=" * 80)
+        mapping_lines.append("CONFIG INDEX MAPPING (Generated from config dict)")
+        mapping_lines.append("=" * 80)
+        mapping_lines.append("")
+        mapping_lines.append("Format: index,bot_matchup,config_name")
+        mapping_lines.append("")
+
+        # Sort by index
+        sorted_mapping = sorted(all_expected_configs.items(), key=lambda x: x[1])
+        for (bot_matchup, config_name), index in sorted_mapping:
+            mapping_lines.append(f"{index},{bot_matchup},{config_name}")
+
+        with open(mapping_file, 'w', encoding='utf-8') as f:
+            f.write("\n".join(mapping_lines))
+
+        print(f"Config mapping written to: {mapping_file}")
+
         print()
         print(f"Summary:")
         print(f"  Total missing/incomplete: {len(all_missing)}")
