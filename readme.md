@@ -39,6 +39,7 @@ Required packages:
 - `pandas` - Data manipulation
 - `plotly` - Interactive plots
 - `seaborn` - Statistical visualizations
+- `python-dotenv` - Environment variable management
 - `streamlit` - Web dashboard (optional)
 - `streamlit_modal` - Modal dialogs for Streamlit (optional)
 
@@ -69,13 +70,36 @@ Required packages:
    - Jupyter Notebook/JupyterLab (select "Python (sumobot-env)" kernel)
    - VS Code (select "Python (sumobot-env)" when choosing a kernel for .ipynb files)
 
-2. **Configure paths** in `analysis.ipynb`:
-   ```python
-   # macOS/Linux
-   simulation_root = "/path/to/Simulation"  # Unity simulation logs
+2. **Configure paths** using a `.env` file:
 
-   # Windows
-   # simulation_root = "C:\\path\\to\\Simulation"
+   Create a `.env` file in the project root with the following variables:
+
+   ```env
+   # Path to Unity simulation logs
+   SIMULATION_DIR=/path/to/Simulation
+
+   # Output directories (can use relative or absolute paths)
+   CONVERT_TARGET_DIR=converted
+   BATCH_CHECKPOINT_DIR=batched
+   SUMMARIZED_TARGET_DIR=result
+   ARENA_HEATMAP_TARGET_DIR=result/arena_heatmaps
+   ```
+
+   Example configurations:
+
+   **macOS:**
+   ```env
+   SIMULATION_DIR=/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch
+   ```
+
+   **Windows:**
+   ```env
+   SIMULATION_DIR=C:\Users\user_name\AppData\LocalLow\DefaultCompany\Sumobot\Logs\Batch\20251231_170916_batch
+   ```
+
+   **Linux:**
+   ```env
+   SIMULATION_DIR=/home/user_name/.config/unity3d/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch
    ```
 
 3. **Run the analysis notebook**:
@@ -91,21 +115,36 @@ The main analysis is performed in **`analysis.ipynb`**, which is divided into th
 
 ### 1. Configuration
 
-Set up directory paths for input simulation logs and output files:
+The project uses a `.env` file to configure directory paths. The first cell in `analysis.ipynb` loads these environment variables using `python-dotenv`.
+
+Create a `.env` file in the project root:
+
+```env
+# Required: Path to Unity simulation logs
+SIMULATION_DIR=/path/to/your/simulation/logs
+
+# Optional: Output directories (defaults shown below)
+CONVERT_TARGET_DIR=converted
+BATCH_CHECKPOINT_DIR=batched
+SUMMARIZED_TARGET_DIR=result
+ARENA_HEATMAP_TARGET_DIR=result/arena_heatmaps
+```
+
+**Platform-specific examples:**
 
 **macOS:**
-```python
-simulation_root = "/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
+```env
+SIMULATION_DIR=/Users/user_name/Library/Application Support/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch
 ```
 
 **Windows:**
-```python
-simulation_root = "C:\\Users\\user_name\\AppData\\LocalLow\\DefaultCompany\\Sumobot\\Logs\\Batch\\20251231_170916_batch"
+```env
+SIMULATION_DIR=C:\Users\user_name\AppData\LocalLow\DefaultCompany\Sumobot\Logs\Batch\20251231_170916_batch
 ```
 
 **Linux:**
-```python
-simulation_root = "/home/user_name/.config/unity3d/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch"
+```env
+SIMULATION_DIR=/home/user_name/.config/unity3d/DefaultCompany/Sumobot/Logs/Batch/20251231_170916_batch
 ```
 
 ### 2. Data Compilation
@@ -160,6 +199,31 @@ The `input_format` parameter:
 - `result/summary_matchup.csv` - Per-matchup configuration data
 - `result/summary_action_timebins.csv` - Action intensity over time
 - `result/summary_collision_timebins.csv` - Collision events over time
+- `result/summary_pacing_factors.csv` - Pacing factors summary (if `compute_pacing=True`)
+- `result/summary_pacing_per_bot.csv` - Per-bot per-timebin pacing statistics for constraint setting (if `compute_pacing=True`)
+
+#### Step 2.2a (Optional): Compute Pacing Batch Separately
+
+If you need to compute or recompute pacing factors independently:
+
+```python
+from compile.generator import batch_process_pacing
+
+batch_process_pacing(
+    converted_dir,
+    batch_size=4,
+    time_bin_size=5,
+    checkpoint_dir="batched",
+    # skip_initial=1,        # Optional: skip initial seconds
+    # bot_option="Bot_NN",   # Optional: process specific bot only
+    input_format="auto"
+)
+```
+
+This is useful when:
+- You want to adjust pacing parameters without reprocessing all statistics
+- You need to analyze pacing for specific bots only
+- You want different time bin sizes for pacing analysis
 
 #### Step 2.3: Generate Arena Heatmaps
 
