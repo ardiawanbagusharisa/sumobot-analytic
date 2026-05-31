@@ -25,7 +25,7 @@ try:
 except Exception:
     print("Using CPU (GPU not available)")
 
-arena_center = np.array([0.24, 1.97])
+arena_center = np.array([0, 0])
 arena_radius = 4.73485
 
 def collect_with_gpu(lf):

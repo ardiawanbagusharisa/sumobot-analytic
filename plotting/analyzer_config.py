@@ -6,7 +6,7 @@ import numpy as np
 # =====================
 # Arena Configuration
 # =====================
-arena_center = np.array([0.24, 1.97])
+arena_center = np.array([0, 0])
 arena_radius = 4.73485
 
 # =====================
