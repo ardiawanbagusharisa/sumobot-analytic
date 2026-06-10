@@ -1356,14 +1356,18 @@ def plot_collision_distribution_stacked(df, bot_col="Bot_L", width=10, height=6,
     return fig
 
 
-def plot_pacing_factors_comparison(
+def plot_pacing_factors_per_bot_summary(
     df,
-    width=18,
-    height=12,
+    width=12,
+    height=6,
 ):
     """
-    Plot pacing factors comparing all bots on the same charts.
-    Shows mean lines for all bots across all 8 pacing factors.
+    Plot pacing factors per bot showing Tempo, Threat, and their Average.
+    Each bot gets its own separate figure.
+    Shows:
+    - Tempo (red): average of tempo factors
+    - Threat (green): average of threat factors
+    - Average (blue): average of tempo and threat
 
     Args:
         df: DataFrame from summary_pacing_per_bot.csv with columns:
@@ -1372,82 +1376,72 @@ def plot_pacing_factors_comparison(
         height: Figure height
 
     Returns:
-        Figure with 4x2 grid comparing all bots
+        Dictionary of {bot_name: figure} with one figure per bot
     """
-    # Define pacing factors (ordered as: Threat, then Tempo)
+    # Define pacing factors
     threat_factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance']
     tempo_factors = ['ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
-    all_factors = threat_factors + tempo_factors
-
-    # Factor display names and units
-    factor_info = {
-        'CollisionRatio': {'label': 'Collision Ratio', 'unit': '(ratio)'},
-        'AbilityRatio': {'label': 'Ability Ratio', 'unit': '(ratio)'},
-        'Angle': {'label': 'Collision Angle', 'unit': '(degrees)'},
-        'SafeDistance': {'label': 'Safe Distance', 'unit': '(units)'},
-        'ActionIntensity': {'label': 'Action Intensity', 'unit': '(count)'},
-        'ActionDensity': {'label': 'Action Density', 'unit': '(entropy)'},
-        'BotsDistance': {'label': 'Bots Distance', 'unit': '(units)'},
-        'Velocity': {'label': 'Velocity', 'unit': '(units/s)'},
-    }
 
     # Get unique bots
     bots = sorted(df['Bot'].unique())
 
-    # Create 4x2 subplot grid
-    fig, axes = plt.subplots(4, 2, figsize=(width, height))
-    axes = axes.flatten()
+    # Store figures in a dictionary
+    figures = {}
 
-    for idx, factor in enumerate(all_factors):
-        ax = axes[idx]
-        mean_col = f'{factor}_mean'
+    for bot in bots:
+        bot_df = df[df['Bot'] == bot].sort_values('TimeBin')
 
-        if mean_col not in df.columns:
-            ax.text(0.5, 0.5, f'No data for {factor}',
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(factor_info[factor]['label'])
+        if bot_df.empty:
             continue
 
-        # Plot each bot
-        for bot in bots:
-            bot_df = df[df['Bot'] == bot].sort_values('TimeBin')
-            if bot_df.empty:
-                continue
+        # Create individual figure for this bot
+        fig, ax = plt.subplots(1, 1, figsize=(width, height))
 
-            x = bot_df['TimeBin'].values
-            mean = bot_df[mean_col].values
+        x = bot_df['TimeBin'].values
 
-            # Get bot-specific styling
-            color = get_bot_color(bot)
-            marker = get_bot_marker(bot)
+        # Calculate Tempo: average of tempo factors
+        tempo_values = []
+        for factor in tempo_factors:
+            mean_col = f'{factor}_mean'
+            if mean_col in bot_df.columns:
+                tempo_values.append(bot_df[mean_col].values)
 
-            ax.plot(x, mean, linewidth=2, marker=marker, markersize=6,
-                   label=bot, color=color, alpha=0.8)
+        if tempo_values:
+            tempo = np.mean(tempo_values, axis=0)
+        else:
+            tempo = np.zeros(len(x))
+
+        # Calculate Threat: average of threat factors
+        threat_values = []
+        for factor in threat_factors:
+            mean_col = f'{factor}_mean'
+            if mean_col in bot_df.columns:
+                threat_values.append(bot_df[mean_col].values)
+
+        if threat_values:
+            threat = np.mean(threat_values, axis=0)
+        else:
+            threat = np.zeros(len(x))
+
+        # Calculate Average: average of tempo and threat
+        average = (tempo + threat) / 2
+
+        # Plot the three lines
+        ax.plot(x, tempo, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
+        ax.plot(x, threat, linewidth=2.5, color='green', label='Threat', alpha=0.8)
+        ax.plot(x, average, linewidth=2.5, color='blue', label='Average', alpha=0.8)
 
         # Styling
-        info = factor_info[factor]
-        ax.set_title(f"{info['label']} {info['unit']}",
-                    fontsize=11, fontweight='bold')
-        ax.set_xlabel('Time (s)', fontsize=9)
-        ax.set_ylabel(info['label'], fontsize=9)
+        ax.set_title(f'{bot} - Pacing Factors', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Time (s)', fontsize=11)
+        ax.set_ylabel('Factor Value', fontsize=11)
         ax.grid(True, alpha=0.3, linestyle='--')
+        ax.legend(loc='best', fontsize=10, framealpha=0.9)
 
-        # Add legend only to first subplot
-        if idx == 0:
-            ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
+        fig.tight_layout()
+        figures[bot] = fig
 
-    # Add overall title
-    fig.suptitle('Pacing Factors Comparison - All Bots',
-                fontsize=16, fontweight='bold', y=0.995)
-
-    # Add aspect labels
-    fig.text(0.02, 0.75, 'THREAT ASPECT', fontsize=12, fontweight='bold',
-            rotation=90, va='center', color=get_theme_color('primary'))
-    fig.text(0.02, 0.25, 'TEMPO ASPECT', fontsize=12, fontweight='bold',
-            rotation=90, va='center', color=get_theme_color('secondary'))
-
-    fig.tight_layout(rect=[0.03, 0, 1, 0.99])
-    return fig
+    return figures
 
 
 def plot_pacing_factors_per_bot(
