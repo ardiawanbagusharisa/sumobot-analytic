@@ -1358,32 +1358,43 @@ def plot_collision_distribution_stacked(df, bot_col="Bot_L", width=10, height=6,
 
 def plot_pacing_factors_per_bot_summary(
     df,
+    rank_df=None,
     width=12,
     height=6,
 ):
     """
     Plot pacing factors per bot showing Tempo, Threat, and their Average.
-    Each bot gets its own separate figure.
+    Each bot gets its own separate figure with normalized values (0-1).
     Shows:
-    - Tempo (red): average of tempo factors
-    - Threat (green): average of threat factors
-    - Average (blue): average of tempo and threat
+    - Tempo (red): normalized average of tempo factors
+    - Threat (green): normalized average of threat factors
+    - Average (blue): normalized average of tempo and threat
 
     Args:
         df: DataFrame from summary_pacing_per_bot.csv with columns:
             Bot, TimeBin, <Factor>_min, <Factor>_max, <Factor>_mean, <Factor>_std
+        rank_df: DataFrame from result/summary_bot.csv with columns:
+            Rank, Bot, Win-rate, etc. Used to order figures by rank.
+            If None, bots are sorted alphabetically.
         width: Figure width
         height: Figure height
 
     Returns:
-        Dictionary of {bot_name: figure} with one figure per bot
+        Dictionary of {bot_name: figure} with one figure per bot, ordered by rank
     """
     # Define pacing factors
     threat_factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance']
     tempo_factors = ['ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
 
-    # Get unique bots
-    bots = sorted(df['Bot'].unique())
+    # Get unique bots and order them by rank if rank_df is provided
+    if rank_df is not None:
+        # Create a rank mapping
+        rank_map = dict(zip(rank_df['Bot'], rank_df['Rank']))
+        available_bots = [bot for bot in df['Bot'].unique() if bot in rank_map]
+        # Sort by rank
+        bots = sorted(available_bots, key=lambda b: rank_map[b])
+    else:
+        bots = sorted(df['Bot'].unique())
 
     # Store figures in a dictionary
     figures = {}
@@ -1426,15 +1437,28 @@ def plot_pacing_factors_per_bot_summary(
         # Calculate Average: average of tempo and threat
         average = (tempo + threat) / 2
 
+        # Normalize all values to 0-1 range
+        def normalize(values):
+            """Normalize values to 0-1 range"""
+            vmin, vmax = values.min(), values.max()
+            if vmax - vmin == 0:
+                return np.zeros_like(values)
+            return (values - vmin) / (vmax - vmin)
+
+        tempo_norm = normalize(tempo)
+        threat_norm = normalize(threat)
+        average_norm = normalize(average)
+
         # Plot the three lines
-        ax.plot(x, tempo, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
-        ax.plot(x, threat, linewidth=2.5, color='green', label='Threat', alpha=0.8)
-        ax.plot(x, average, linewidth=2.5, color='blue', label='Average', alpha=0.8)
+        ax.plot(x, tempo_norm, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
+        ax.plot(x, threat_norm, linewidth=2.5, color='green', label='Threat', alpha=0.8)
+        ax.plot(x, average_norm, linewidth=2.5, color='blue', label='Average', alpha=0.8)
 
         # Styling
-        ax.set_title(f'{bot} - Pacing Factors', fontsize=14, fontweight='bold')
+        ax.set_title(f'{bot} - Pacing Factors (Normalized)', fontsize=14, fontweight='bold')
         ax.set_xlabel('Time (s)', fontsize=11)
-        ax.set_ylabel('Factor Value', fontsize=11)
+        ax.set_ylabel('Normalized Factor Value (0-1)', fontsize=11)
+        ax.set_ylim(-0.05, 1.05)  # Slight padding beyond 0-1
         ax.grid(True, alpha=0.3, linestyle='--')
         ax.legend(loc='best', fontsize=10, framealpha=0.9)
 
