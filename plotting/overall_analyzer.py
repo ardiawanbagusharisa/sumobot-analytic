@@ -1358,13 +1358,14 @@ def plot_collision_distribution_stacked(df, bot_col="Bot_L", width=10, height=6,
 
 def plot_pacing_factors_per_bot_summary(
     df,
+    rank_df=None,
     width=12,
     height=6,
 ):
     """
     Plot pacing factors per bot showing Tempo, Threat, and their Average.
     Each bot gets its own separate figure with normalized values (0-1).
-    Bots are ranked by overall average pacing value.
+    Figures are ordered by overall average pacing value.
     Shows:
     - Tempo (red): normalized average of tempo factors
     - Threat (green): normalized average of threat factors
@@ -1373,13 +1374,17 @@ def plot_pacing_factors_per_bot_summary(
     Args:
         df: DataFrame from summary_pacing_per_bot.csv with columns:
             Bot, TimeBin, <Factor>_min, <Factor>_max, <Factor>_mean, <Factor>_std
+        rank_df: DataFrame from result/summary_bot.csv with columns:
+            Rank, Bot, Win-rate, etc. Used for rank display in summary table.
+            If None, ranks are based on overall_avg (pacing rank).
         width: Figure width
         height: Figure height
 
     Returns:
         tuple: (summary_df, figures) where:
             - summary_df: DataFrame with columns [Rank, Bot, Overall_Avg]
-                         ranked by overall average pacing (highest first)
+                         ordered by overall average pacing (highest first)
+                         Rank column shows rank_df rank if provided, else pacing rank
             - figures: Dictionary of {bot_name: figure} ordered by overall_avg
     """
     # Define pacing factors
@@ -1433,12 +1438,19 @@ def plot_pacing_factors_per_bot_summary(
     # Sort bots by overall_avg (descending - highest pacing first)
     bots = sorted(bot_overall_avg.keys(), key=lambda b: bot_overall_avg[b], reverse=True)
 
-    # Create summary DataFrame
+    # Create rank mapping from rank_df if provided
     import pandas as pd
+    rank_map = {}
+    if rank_df is not None:
+        rank_map = dict(zip(rank_df['Bot'], rank_df['Rank']))
+
+    # Create summary DataFrame
     summary_data = []
-    for rank, bot in enumerate(bots, start=1):
+    for pacing_rank, bot in enumerate(bots, start=1):
+        # Use rank from rank_df if available, otherwise use pacing rank
+        display_rank = rank_map.get(bot, pacing_rank)
         summary_data.append({
-            'Rank': rank,
+            'Rank': display_rank,
             'Bot': bot,
             'Overall_Avg': bot_overall_avg[bot]
         })
