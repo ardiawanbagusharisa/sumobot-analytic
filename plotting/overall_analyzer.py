@@ -1449,6 +1449,9 @@ def plot_pacing_factors_per_bot_summary(
         threat_norm = normalize(threat)
         average_norm = normalize(average)
 
+        # Calculate overall average across all time bins
+        overall_avg = np.mean(average_norm)
+
         # Plot the three lines
         ax.plot(x, tempo_norm, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
         ax.plot(x, threat_norm, linewidth=2.5, color='green', label='Threat', alpha=0.8)
@@ -1462,7 +1465,11 @@ def plot_pacing_factors_per_bot_summary(
         ax.grid(True, alpha=0.3, linestyle='--')
         ax.legend(loc='best', fontsize=10, framealpha=0.9)
 
-        fig.tight_layout()
+        # Add overall average text above the plot
+        fig.suptitle(f'Overall Average: {overall_avg:.3f}',
+                    fontsize=12, fontweight='bold', y=0.98)
+
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
         figures[bot] = fig
 
     return figures
