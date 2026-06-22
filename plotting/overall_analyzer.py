@@ -1361,15 +1361,16 @@ def plot_pacing_factors_per_bot_summary(
     rank_df=None,
     width=12,
     height=6,
+    normalize_values=True,
 ):
     """
     Plot pacing factors per bot showing Tempo, Threat, and their Average.
-    Each bot gets its own separate figure with normalized values (0-1).
+    Each bot gets its own separate figure.
     Figures are ordered by overall average pacing value.
     Shows:
-    - Tempo (red): normalized average of tempo factors
-    - Threat (green): normalized average of threat factors
-    - Average (blue): normalized average of tempo and threat
+    - Tempo (red): average of tempo factors
+    - Threat (green): average of threat factors
+    - Average (blue): average of tempo and threat
 
     Args:
         df: DataFrame from summary_pacing_per_bot.csv with columns:
@@ -1379,6 +1380,7 @@ def plot_pacing_factors_per_bot_summary(
             If None, ranks are based on overall_avg (pacing rank).
         width: Figure width
         height: Figure height
+        normalize_values: If True, normalize values to 0-1 range. If False, use raw values.
 
     Returns:
         tuple: (summary_df, figures) where:
@@ -1430,15 +1432,19 @@ def plot_pacing_factors_per_bot_summary(
 
         threat = np.mean(threat_values, axis=0) if threat_values else np.zeros(len(bot_df))
 
-        # Normalize tempo and threat first
-        tempo_norm = normalize(tempo)
-        threat_norm = normalize(threat)
+        # Apply normalization if enabled
+        if normalize_values:
+            tempo_final = normalize(tempo)
+            threat_final = normalize(threat)
+        else:
+            tempo_final = tempo
+            threat_final = threat
 
-        # Calculate Average from normalized values
-        average_norm = (tempo_norm + threat_norm) / 2
+        # Calculate Average
+        average_final = (tempo_final + threat_final) / 2
 
         # Calculate overall average
-        overall_avg = np.mean(average_norm)
+        overall_avg = np.mean(average_final)
 
         bot_overall_avg[bot] = overall_avg
 
@@ -1499,27 +1505,36 @@ def plot_pacing_factors_per_bot_summary(
 
         threat = np.mean(threat_values, axis=0) if threat_values else np.zeros(len(x))
 
-        # Normalize tempo and threat first
-        tempo_norm = normalize(tempo)
-        threat_norm = normalize(threat)
+        # Apply normalization if enabled
+        if normalize_values:
+            tempo_final = normalize(tempo)
+            threat_final = normalize(threat)
+        else:
+            tempo_final = tempo
+            threat_final = threat
 
-        # Calculate Average from normalized values (midpoint between normalized lines)
-        average_norm = (tempo_norm + threat_norm) / 2
+        # Calculate Average (midpoint between tempo and threat)
+        average_final = (tempo_final + threat_final) / 2
 
         # Calculate overall average for this bot
         overall_avg = bot_overall_avg[bot]
 
         # Plot the three lines
-        ax.plot(x, tempo_norm, linewidth=2.5, color='blue', label='Tempo', alpha=0.8)
-        ax.plot(x, threat_norm, linewidth=2.5, color='red', label='Threat', alpha=0.8)
-        ax.plot(x, average_norm, linewidth=2.5, color='green', label='Average', alpha=0.8)
+        ax.plot(x, tempo_final, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
+        ax.plot(x, threat_final, linewidth=2.5, color='green', label='Threat', alpha=0.8)
+        ax.plot(x, average_final, linewidth=2.5, color='blue', label='Average', alpha=0.8)
 
         # Styling
-        ax.set_title(f'{bot} - Pacing Factors (Normalized)\nOverall Average: {overall_avg:.3f}',
+        title_suffix = "(Normalized)" if normalize_values else "(Raw Values)"
+        ax.set_title(f'{bot} - Pacing Factors {title_suffix}\nOverall Average: {overall_avg:.3f}',
                     fontsize=14, fontweight='bold')
         ax.set_xlabel('Time (s)', fontsize=11)
-        ax.set_ylabel('Normalized Factor Value (0-1)', fontsize=11)
-        ax.set_ylim(-0.05, 1.05)  # Slight padding beyond 0-1
+
+        if normalize_values:
+            ax.set_ylabel('Normalized Factor Value (0-1)', fontsize=11)
+            ax.set_ylim(-0.05, 1.05)  # Slight padding beyond 0-1
+        else:
+            ax.set_ylabel('Factor Value', fontsize=11)
         ax.grid(True, alpha=0.3, linestyle='--')
         ax.legend(loc='best', fontsize=10, framealpha=0.9)
 
