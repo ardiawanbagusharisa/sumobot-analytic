@@ -1421,7 +1421,8 @@ def plot_pacing_factors_per_bot_summary(
             if mean_col in bot_df.columns:
                 tempo_values.append(bot_df[mean_col].values)
 
-        tempo = np.mean(tempo_values, axis=0) if tempo_values else np.zeros(len(bot_df))
+        # Use nanmean to ignore NaN values (matches C# behavior of skipping NaN in averaging)
+        tempo = np.nanmean(tempo_values, axis=0) if tempo_values else np.zeros(len(bot_df))
 
         # Calculate Threat: average of threat factors
         threat_values = []
@@ -1430,7 +1431,8 @@ def plot_pacing_factors_per_bot_summary(
             if mean_col in bot_df.columns:
                 threat_values.append(bot_df[mean_col].values)
 
-        threat = np.mean(threat_values, axis=0) if threat_values else np.zeros(len(bot_df))
+        # Use nanmean to ignore NaN values (matches C# behavior of skipping NaN in averaging)
+        threat = np.nanmean(threat_values, axis=0) if threat_values else np.zeros(len(bot_df))
 
         # Apply normalization if enabled
         if normalize_values:
@@ -1494,7 +1496,8 @@ def plot_pacing_factors_per_bot_summary(
             if mean_col in bot_df.columns:
                 tempo_values.append(bot_df[mean_col].values)
 
-        tempo = np.mean(tempo_values, axis=0) if tempo_values else np.zeros(len(x))
+        # Use nanmean to ignore NaN values (matches C# behavior of skipping NaN in averaging)
+        tempo = np.nanmean(tempo_values, axis=0) if tempo_values else np.zeros(len(x))
 
         # Calculate Threat: average of threat factors
         threat_values = []
@@ -1503,7 +1506,8 @@ def plot_pacing_factors_per_bot_summary(
             if mean_col in bot_df.columns:
                 threat_values.append(bot_df[mean_col].values)
 
-        threat = np.mean(threat_values, axis=0) if threat_values else np.zeros(len(x))
+        # Use nanmean to ignore NaN values (matches C# behavior of skipping NaN in averaging)
+        threat = np.nanmean(threat_values, axis=0) if threat_values else np.zeros(len(x))
 
         # Apply normalization if enabled
         if normalize_values:
@@ -1520,9 +1524,9 @@ def plot_pacing_factors_per_bot_summary(
         overall_avg = bot_overall_avg[bot]
 
         # Plot the three lines
-        ax.plot(x, tempo_final, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
-        ax.plot(x, threat_final, linewidth=2.5, color='green', label='Threat', alpha=0.8)
-        ax.plot(x, average_final, linewidth=2.5, color='blue', label='Average', alpha=0.8)
+        ax.plot(x, tempo_final, linewidth=2.5, color='blue', label='Tempo', alpha=0.8)
+        ax.plot(x, threat_final, linewidth=2.5, color='red', label='Threat', alpha=0.8)
+        ax.plot(x, average_final, linewidth=2.5, color='green', label='Average', alpha=0.8)
 
         # Styling
         title_suffix = "(Normalized)" if normalize_values else "(Raw Values)"
