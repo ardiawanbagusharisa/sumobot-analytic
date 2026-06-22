@@ -715,7 +715,7 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
         base_dir: Base directory containing simulation data
         batch_size: Number of files per batch
         checkpoint_dir: Directory to save checkpoints
-        time_bin_size: Size of time bins for pacing factors
+        time_bin_size: Size of time bins for pacing factors (single value or list/array of values, e.g., [1, 3, 5])
         bot_option: "all" for all bots, or specific bot name to filter (e.g., "BotA")
         input_format: "csv", "parquet", or "auto" to detect both
         skip_initial: Number of seconds to skip at the start to avoid initial bias (default: 0.0)
@@ -725,11 +725,13 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # Create checkpoint dir for pacing factors
-    pacing_factors_dir = os.path.join(checkpoint_dir, "pacing_factors")
-    os.makedirs(pacing_factors_dir, exist_ok=True)
+    # Convert time_bin_size to list if it's a single value
+    if isinstance(time_bin_size, (int, float)):
+        time_bin_sizes = [time_bin_size]
+    else:
+        time_bin_sizes = list(time_bin_size)
 
-    # Find all data files grouped by matchup/config
+    # Find all data files grouped by matchup/config (do this once)
     all_files = []
     matchup_folders = [f for f in os.listdir(base_dir)
                        if os.path.isdir(os.path.join(base_dir, f))]
@@ -768,63 +770,75 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
     bot_filter_msg = f"for bot '{bot_option}'" if bot_option != "all" else "for all bots"
     print(f"Found {len(all_files)} {file_type} files to process {bot_filter_msg}")
 
-    # Determine which batches are already processed
-    processed_batches = set()
-    for f in os.listdir(pacing_factors_dir):
-        match = re.match(r"batch_(\d+)\.csv", f)
-        if match:
-            processed_batches.add(int(match.group(1)))
+    # Process for each time bin size
+    for current_bin_size in time_bin_sizes:
+        print(f"\n{'='*60}")
+        print(f"Processing with time_bin_size = {current_bin_size}s")
+        print(f"{'='*60}")
 
-    # Process in batches
-    total_batches = (len(all_files) + batch_size - 1) // batch_size
+        # Create checkpoint dir for this bin size
+        # Format: pacing_factors_1, pacing_factors_3, pacing_factors_5, etc.
+        bin_size_str = str(current_bin_size).replace('.', '_')  # Handle decimals: 2.5 -> 2_5
+        pacing_factors_dir = os.path.join(checkpoint_dir, f"pacing_factors_{bin_size_str}")
+        os.makedirs(pacing_factors_dir, exist_ok=True)
 
-    for batch_idx in range(total_batches):
-        batch_num = batch_idx + 1
+        # Determine which batches are already processed for this bin size
+        processed_batches = set()
+        for f in os.listdir(pacing_factors_dir):
+            match = re.match(r"batch_(\d+)\.csv", f)
+            if match:
+                processed_batches.add(int(match.group(1)))
 
-        # Skip if already processed
-        if batch_num in processed_batches:
-            print(f"Skipping pacing batch {batch_num}/{total_batches} (already processed)")
-            continue
+        # Process in batches
+        total_batches = (len(all_files) + batch_size - 1) // batch_size
 
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(all_files))
-        batch_files = all_files[start_idx:end_idx]
+        for batch_idx in range(total_batches):
+            batch_num = batch_idx + 1
 
-        print(f"\nProcessing pacing batch {batch_num}/{total_batches} ({len(batch_files)} files)...")
-
-        # Process only pacing factors
-        pacing_fragment_list = []
-
-        for csv_path in batch_files:
-            # Extract bot names and config from path
-            parts = csv_path.split(os.sep)
-            matchup_folder = parts[-3]
-            config_folder = parts[-2]
-
-            match = re.match(r"(.+)_vs_(.+)", matchup_folder)
-            if not match:
+            # Skip if already processed
+            if batch_num in processed_batches:
+                print(f"Skipping pacing batch {batch_num}/{total_batches} (already processed)")
                 continue
-            bot_a, bot_b = match.groups()
 
-            # Parse config
-            config = parse_config_name_cached(config_folder)
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(all_files))
+            batch_files = all_files[start_idx:end_idx]
 
-            # Scan file (CSV or Parquet) with Polars lazy API
-            lf = scan_file(csv_path)
+            print(f"\nProcessing pacing batch {batch_num}/{total_batches} ({len(batch_files)} files)...")
 
-            # Process pacing factors
-            pacing_tb = process_pacing_factors_timebins_single_csv(
-                lf, bot_a, bot_b, config, time_bin_size, skip_initial=skip_initial
-            )
-            if pacing_tb:
-                pacing_fragment_list.extend(pacing_tb)
+            # Process only pacing factors
+            pacing_fragment_list = []
 
-        # Save pacing factors batch if computed
-        if pacing_fragment_list:
-            pacing_factors_df = pl.DataFrame(pacing_fragment_list)
-            pacing_path = os.path.join(pacing_factors_dir, f"batch_{batch_num:02d}.csv")
-            pacing_factors_df.write_csv(pacing_path)
-            print(f"Saved pacing factors batch: {pacing_path} ({len(pacing_factors_df)} records)")
+            for csv_path in batch_files:
+                # Extract bot names and config from path
+                parts = csv_path.split(os.sep)
+                matchup_folder = parts[-3]
+                config_folder = parts[-2]
+
+                match = re.match(r"(.+)_vs_(.+)", matchup_folder)
+                if not match:
+                    continue
+                bot_a, bot_b = match.groups()
+
+                # Parse config
+                config = parse_config_name_cached(config_folder)
+
+                # Scan file (CSV or Parquet) with Polars lazy API
+                lf = scan_file(csv_path)
+
+                # Process pacing factors with current bin size
+                pacing_tb = process_pacing_factors_timebins_single_csv(
+                    lf, bot_a, bot_b, config, current_bin_size, skip_initial=skip_initial
+                )
+                if pacing_tb:
+                    pacing_fragment_list.extend(pacing_tb)
+
+            # Save pacing factors batch if computed
+            if pacing_fragment_list:
+                pacing_factors_df = pl.DataFrame(pacing_fragment_list)
+                pacing_path = os.path.join(pacing_factors_dir, f"batch_{batch_num:02d}.csv")
+                pacing_factors_df.write_csv(pacing_path)
+                print(f"Saved pacing factors batch: {pacing_path} ({len(pacing_factors_df)} records)")
 
 
 def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, compute_pacing=False, input_format="csv"):
@@ -1090,10 +1104,18 @@ def create_summary_bot(matchup_summary, output_dir):
     return bot_summary
 
 
-def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_percentile = 5):
+def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_percentile=5, pacing_bin_size=None):
     """
     Generate timebin summaries from batched timebin checkpoints
     Loads batch files and creates final summaries
+
+    Args:
+        checkpoint_dir: Directory containing batch checkpoints
+        output_dir: Directory to save final summaries
+        pacing_ratio_percentile: Percentile for pacing ratio calculation
+        pacing_bin_size: Time bin size for pacing factors (e.g., 5 or "2_5" for 2.5s).
+                        If None, uses default "pacing_factors" folder.
+                        Can also be a list/array to process multiple bin sizes.
     """
     print("=" * 60)
     print("🚀 Generating timebin summaries from batches")
@@ -1121,46 +1143,79 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
         print("\n Creating collision time-bin summary...")
         summarize_collision_timebins(collision_timebin_df, output_dir)
 
-    # Load pacing factors batches
-    pacing_batch_files = sorted(glob.glob(f"{checkpoint_dir}/pacing_factors/batch_*.csv"))
-    if pacing_batch_files:
-        print(f"\n📂 Loading {len(pacing_batch_files)} pacing factors batch files...")
+    # Process pacing factors (support multiple bin sizes)
+    if pacing_bin_size is not None:
+        # Convert to list if single value
+        if isinstance(pacing_bin_size, (int, float, str)):
+            bin_sizes = [pacing_bin_size]
+        else:
+            bin_sizes = list(pacing_bin_size)
+    else:
+        # Try default folder first, then auto-detect folders
+        default_folder = os.path.join(checkpoint_dir, "pacing_factors")
+        if os.path.exists(default_folder):
+            bin_sizes = [None]  # Use default "pacing_factors" folder
+        else:
+            # Auto-detect pacing_factors_* folders
+            pacing_dirs = [d for d in os.listdir(checkpoint_dir) if d.startswith("pacing_factors_")]
+            if pacing_dirs:
+                # Extract bin sizes from folder names
+                bin_sizes = [d.replace("pacing_factors_", "") for d in pacing_dirs]
+                print(f"\n📂 Auto-detected pacing bin sizes: {bin_sizes}")
+            else:
+                bin_sizes = []
 
-        # Define the expected schema with all numeric fields as Float64
-        schema_overrides = {
-            'CollisionRatio_L': pl.Float64,
-            'AbilityRatio_L': pl.Float64,
-            'Angle_L': pl.Float64,
-            'SafeDistance_L': pl.Float64,
-            'ActionIntensity_L': pl.Float64,
-            'ActionDensity_L': pl.Float64,
-            'BotsDistance_L': pl.Float64,
-            'Velocity_L': pl.Float64,
-            'CollisionRatio_R': pl.Float64,
-            'AbilityRatio_R': pl.Float64,
-            'Angle_R': pl.Float64,
-            'SafeDistance_R': pl.Float64,
-            'ActionIntensity_R': pl.Float64,
-            'ActionDensity_R': pl.Float64,
-            'BotsDistance_R': pl.Float64,
-            'Velocity_R': pl.Float64,
-        }
+    # Load and process each bin size
+    for bin_size in bin_sizes:
+        if bin_size is None:
+            pacing_folder = "pacing_factors"
+            output_suffix = ""
+        else:
+            # Convert numeric bin sizes to string format
+            bin_size_str = str(bin_size).replace('.', '_')
+            pacing_folder = f"pacing_factors_{bin_size_str}"
+            output_suffix = f"_{bin_size_str}"
 
-        # Load each file with schema alignment
-        pacing_dfs = []
-        for f in pacing_batch_files:
-            df = pl.read_csv(f)
-            # Cast all pacing factor columns to Float64 to ensure consistent schema
-            for col, dtype in schema_overrides.items():
-                if col in df.columns:
-                    df = df.with_columns(pl.col(col).cast(dtype))
-            pacing_dfs.append(df)
+        pacing_batch_files = sorted(glob.glob(f"{checkpoint_dir}/{pacing_folder}/batch_*.csv"))
 
-        pacing_factors_df = pl.concat(pacing_dfs)
-        print(f"Loaded {len(pacing_factors_df):,} pacing factor records")
+        if pacing_batch_files:
+            print(f"\n📂 Loading {len(pacing_batch_files)} pacing factors batch files (bin_size={bin_size or 'default'})...")
 
-        print("\n Creating pacing factors summary...")
-        summarize_pacing_factors(pacing_factors_df, output_dir, pacing_ratio_percentile)
+            # Define the expected schema with all numeric fields as Float64
+            schema_overrides = {
+                'CollisionRatio_L': pl.Float64,
+                'AbilityRatio_L': pl.Float64,
+                'Angle_L': pl.Float64,
+                'SafeDistance_L': pl.Float64,
+                'ActionIntensity_L': pl.Float64,
+                'ActionDensity_L': pl.Float64,
+                'BotsDistance_L': pl.Float64,
+                'Velocity_L': pl.Float64,
+                'CollisionRatio_R': pl.Float64,
+                'AbilityRatio_R': pl.Float64,
+                'Angle_R': pl.Float64,
+                'SafeDistance_R': pl.Float64,
+                'ActionIntensity_R': pl.Float64,
+                'ActionDensity_R': pl.Float64,
+                'BotsDistance_R': pl.Float64,
+                'Velocity_R': pl.Float64,
+            }
+
+            # Load each file with schema alignment
+            pacing_dfs = []
+            for f in pacing_batch_files:
+                df = pl.read_csv(f)
+                # Cast all pacing factor columns to Float64 to ensure consistent schema
+                for col, dtype in schema_overrides.items():
+                    if col in df.columns:
+                        df = df.with_columns(pl.col(col).cast(dtype))
+                pacing_dfs.append(df)
+
+            pacing_factors_df = pl.concat(pacing_dfs)
+            print(f"Loaded {len(pacing_factors_df):,} pacing factor records")
+
+            print(f"\n Creating pacing factors summary (bin_size={bin_size or 'default'})...")
+            summarize_pacing_factors(pacing_factors_df, output_dir, pacing_ratio_percentile, output_suffix)
 
     print("\n" + "=" * 60)
     print("🎉 Done! Created:")
@@ -1168,9 +1223,10 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
         print("   - summary_action_timebins.csv")
     if collision_batch_files:
         print("   - summary_collision_timebins.csv")
-    if pacing_batch_files:
-        print("   - summary_pacing_factors.csv")
-        print("   - summary_pacing_per_bot.csv")
+    if bin_sizes:
+        for bin_size in bin_sizes:
+            suffix = "" if bin_size is None else f"_{str(bin_size).replace('.', '_')}"
+            print(f"   - summary_pacing_per_bot{suffix}.csv")
     print("=" * 60)
 
 
@@ -1317,11 +1373,17 @@ def summarize_collision_timebins(collision_fragment_df, output_dir):
     return summary
 
 
-def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5):
+def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile=5, output_suffix=""):
     """
     Summarize pacing factors with GPU acceleration.
     Computes mean and std for each factor per bot/config/timebin.
     Also provides per-bot statistics across all matchups.
+
+    Args:
+        pacing_factors_df: DataFrame with pacing factor data
+        output_dir: Output directory
+        ratio_percentile: Percentile for pacing ratio calculation
+        output_suffix: Suffix to append to output filenames (e.g., "_5" for 5s bin size)
     """
     print(" Creating pacing factors summary...")
 
@@ -1353,8 +1415,8 @@ def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5
     summary = collect_with_gpu(summary_lazy)
 
     # Save matchup-level summary
-    summary.write_csv(f"{output_dir}/summary_pacing_factors.csv")
-    print(f"Saved {output_dir}/summary_pacing_factors.csv")
+    summary.write_csv(f"{output_dir}/summary_pacing_factors{output_suffix}.csv")
+    print(f"Saved {output_dir}/summary_pacing_factors{output_suffix}.csv")
 
     # Create per-bot statistics (min, max, mean, std for constraint setting)
     print(" Creating per-bot per-timebin pacing statistics for constraint setting...")
@@ -1404,8 +1466,8 @@ def summarize_pacing_factors(pacing_factors_df, output_dir, ratio_percentile = 5
     bot_stats = collect_with_gpu(bot_stats_lazy)
 
     # Save per-bot per-timebin statistics
-    bot_stats.write_csv(f"{output_dir}/summary_pacing_per_bot.csv")
-    print(f"Saved {output_dir}/summary_pacing_per_bot.csv")
+    bot_stats.write_csv(f"{output_dir}/summary_pacing_per_bot{output_suffix}.csv")
+    print(f"Saved {output_dir}/summary_pacing_per_bot{output_suffix}.csv")
     print(f"  Use this file to set constraint ranges (min, max) for each bot per timebin segment")
 
     return summary, bot_stats

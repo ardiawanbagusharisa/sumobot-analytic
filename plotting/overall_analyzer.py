@@ -1362,6 +1362,7 @@ def plot_pacing_factors_per_bot_summary(
     width=12,
     height=6,
     normalize_values=True,
+    wide_format=True,
 ):
     """
     Plot pacing factors per bot showing Tempo, Threat, and their Average.
@@ -1381,17 +1382,38 @@ def plot_pacing_factors_per_bot_summary(
         width: Figure width
         height: Figure height
         normalize_values: If True, normalize values to 0-1 range. If False, use raw values.
+        wide_format: If True, returns wide DataFrame with all factors as columns.
+                    If False, returns separate detailed_stats dict.
 
     Returns:
-        tuple: (summary_df, figures) where:
-            - summary_df: DataFrame with columns [Rank, Bot, Overall_Avg]
-                         ordered by overall average pacing (highest first)
-                         Rank column shows rank_df rank if provided, else pacing rank
-            - figures: Dictionary of {bot_name: figure} ordered by overall_avg
+        If wide_format=True:
+            tuple: (summary_df, figures) where:
+                - summary_df: Wide DataFrame with columns [Rank, Bot, Overall_Avg,
+                             Factor1_Mean, Factor1_Std, Factor1_Min, Factor1_Max, ...]
+                - figures: Dictionary of {bot_name: figure}
+
+        If wide_format=False:
+            tuple: (summary_df, figures, detailed_stats) where:
+                - summary_df: DataFrame with columns [Rank, Bot, Overall_Avg]
+                - figures: Dictionary of {bot_name: figure}
+                - detailed_stats: Dictionary of {bot_name: DataFrame} with per-factor statistics
     """
     # Define pacing factors
     threat_factors = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance']
     tempo_factors = ['ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
+    all_factors = threat_factors + tempo_factors
+
+    # Factor display names
+    factor_info = {
+        'CollisionRatio': {'label': 'Collision Ratio'},
+        'AbilityRatio': {'label': 'Ability Ratio'},
+        'Angle': {'label': 'Collision Angle'},
+        'SafeDistance': {'label': 'Safe Distance'},
+        'ActionIntensity': {'label': 'Action Intensity'},
+        'ActionDensity': {'label': 'Action Density'},
+        'BotsDistance': {'label': 'Bots Distance'},
+        'Velocity': {'label': 'Velocity'},
+    }
 
     # Helper function to normalize
     def normalize(values):
@@ -1471,8 +1493,9 @@ def plot_pacing_factors_per_bot_summary(
         })
     summary_df = pd.DataFrame(summary_data)
 
-    # Store figures in a dictionary (ordered)
+    # Store figures and detailed stats in dictionaries (ordered)
     figures = {}
+    detailed_stats = {}
 
     for bot in bots:
         bot_df = df[df['Bot'] == bot].copy()
@@ -1545,7 +1568,68 @@ def plot_pacing_factors_per_bot_summary(
         fig.tight_layout()
         figures[bot] = fig
 
-    return summary_df, figures
+        # Create detailed factor statistics for this bot
+        factor_stats = []
+        for factor in all_factors:
+            factor_label = factor_info[factor]['label']
+            mean_col = f'{factor}_mean'
+            std_col = f'{factor}_std'
+            min_col = f'{factor}_min'
+            max_col = f'{factor}_max'
+
+            row = {'Factor': factor_label}
+
+            if mean_col in bot_df.columns:
+                row['Overall_Mean'] = f"{bot_df[mean_col].mean():.2f}"
+            else:
+                row['Overall_Mean'] = None
+
+            if std_col in bot_df.columns:
+                row['Overall_Std'] = f"{bot_df[std_col].mean():.2f}"
+            else:
+                row['Overall_Std'] = None
+
+            if min_col in bot_df.columns:
+                row['Overall_Min'] = f"{bot_df[min_col].mean():.2f}"
+            else:
+                row['Overall_Min'] = None
+
+            if max_col in bot_df.columns:
+                row['Overall_Max'] = f"{bot_df[max_col].mean():.2f}"
+            else:
+                row['Overall_Max'] = None
+
+            factor_stats.append(row)
+
+        detailed_stats[bot] = pd.DataFrame(factor_stats)
+
+    # Return based on format preference
+    if wide_format:
+        # Create wide summary DataFrame combining overall stats with factor details
+        wide_summary = []
+        for _, row in summary_df.iterrows():
+            bot_name = row['Bot']
+            bot_row = {
+                'Rank': row['Rank'],
+                'Bot': bot_name,
+                'Overall_Avg': round(row['Overall_Avg'], 3)
+            }
+
+            # Add all factor details as columns
+            if bot_name in detailed_stats:
+                for _, factor_row in detailed_stats[bot_name].iterrows():
+                    factor = factor_row['Factor'].replace(' ', '')  # Remove spaces from factor names
+                    bot_row[f'{factor}_Mean'] = factor_row['Overall_Mean']
+                    bot_row[f'{factor}_Std'] = factor_row['Overall_Std']
+                    bot_row[f'{factor}_Min'] = factor_row['Overall_Min']
+                    bot_row[f'{factor}_Max'] = factor_row['Overall_Max']
+
+            wide_summary.append(bot_row)
+
+        wide_summary_df = pd.DataFrame(wide_summary)
+        return wide_summary_df, figures
+    else:
+        return summary_df, figures, detailed_stats
 
 
 def plot_pacing_factors_per_bot(
