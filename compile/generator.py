@@ -28,6 +28,58 @@ except Exception:
 arena_center = np.array([0, 0])
 arena_radius = 4.73485
 
+# Pacing Factor Constraints (matching C# ConstraintConfig from JSON)
+# Each tuple is (min, max) for normalization
+PACING_CONSTRAINTS = {
+    # Threat factors
+    'CollisionRatio': (0.0, 1.0),
+    'AbilityRatio': (0.0, 0.2),
+    'Angle': (0.0, 1.0),  # Cosine-normalized angle (0 = perpendicular, 1 = aligned)
+    'SafeDistance': (1.0, 5.0),
+    # Tempo factors
+    'ActionIntensity': (0.0, 50.0),
+    'ActionDensity': (0.0, 1.0),  # Shannon entropy typically 0-1 for our action types
+    'BotsDistance': (1.0, 5.0),
+    'Velocity': (0.0, 10.0),
+}
+
+# Factors that need inversion (1 - normalized_value)
+# In C#: Angle, SafeDistance, BotsDistance are inverted
+INVERTED_FACTORS = {'Angle', 'SafeDistance', 'BotsDistance'}
+
+def normalize_pacing_factor(value, factor_name):
+    """
+    Normalize a pacing factor value to 0-1 range using constraints.
+    Matches C# ConstraintMinMax.Normalize() behavior.
+
+    Args:
+        value: Raw factor value (can be NaN)
+        factor_name: Name of the factor (without _L or _R suffix)
+
+    Returns:
+        Normalized value in [0, 1] range, or NaN if input is NaN
+    """
+    if np.isnan(value):
+        return np.nan
+
+    # Get constraints for this factor
+    min_val, max_val = PACING_CONSTRAINTS.get(factor_name, (0.0, 1.0))
+
+    # Normalize: (value - min) / (max - min)
+    if max_val - min_val == 0:
+        normalized = 0.0
+    else:
+        normalized = (value - min_val) / (max_val - min_val)
+
+    # Clamp to [0, 1]
+    normalized = np.clip(normalized, 0.0, 1.0)
+
+    # Apply inversion if needed (matching C# behavior)
+    if factor_name in INVERTED_FACTORS:
+        normalized = 1.0 - normalized
+
+    return float(normalized)
+
 def collect_with_gpu(lf):
     """Helper to collect LazyFrame with GPU if available"""
     if GPU_AVAILABLE:
@@ -316,9 +368,12 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
 def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size, skip_initial=0.0):
     """
     Process pacing factors per timebin for a single CSV/Parquet file
-    Calculates 8 pacing factors for both bots in each timebin:
+    Calculates and normalizes 8 pacing factors for both bots in each timebin:
     - Threat: CollisionRatio, AbilityRatio, Angle, SafeDistance
     - Tempo: ActionIntensity, ActionDensity, BotsDistance, Velocity
+
+    All factors are normalized to [0, 1] range using constraints matching C# implementation.
+    Inverted factors (Angle, SafeDistance, BotsDistance) are calculated as (1 - normalized_value).
 
     Args:
         lf: Lazy frame of the data
@@ -328,7 +383,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         time_bin_size: Size of time bins in seconds
         skip_initial: Number of seconds to skip at the start (default: 0.0)
 
-    Returns list of time-binned pacing factor records (per matchup)
+    Returns list of time-binned pacing factor records with normalized values (per matchup)
     """
     # Get match duration per game
     match_dur_lf = lf.group_by("GameIndex").agg([
@@ -428,16 +483,37 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 else:
                     ability_ratio = np.nan  # No action data in this timebin
 
-                # 3. Angle: Average angle between bot and opponent during collisions
+                # 3. Angle: Average cosine-normalized angle (matching C# api.Angle(normalized: true))
                 if len(collision_actor) > 0:
-                    # Calculate relative angle between bots
-                    bot_rot = collision_actor['BotRot'].values
-                    enemy_rot = collision_actor['EnemyBotRot'].values
+                    # Get bot rotation and positions
+                    bot_rot = collision_actor['BotRot'].values  # Degrees
+                    bot_x = collision_actor['BotPosX'].values
+                    bot_y = collision_actor['BotPosY'].values
+                    enemy_x = collision_actor['EnemyBotPosX'].values
+                    enemy_y = collision_actor['EnemyBotPosY'].values
 
-                    # Angle difference (absolute, normalized to 0-180)
-                    angle_diff = np.abs(bot_rot - enemy_rot)
-                    angle_diff = np.minimum(angle_diff, 360 - angle_diff)  # Normalize to 0-180
-                    avg_angle = float(np.mean(angle_diff[~np.isnan(angle_diff)]) if len(angle_diff) > 0 else np.nan)
+                    # Calculate bot's facing direction from rotation
+                    # Unity: Quaternion.Euler(0, 0, zRot) * Vector2.up = (-sin(rot), cos(rot))
+                    bot_rot_rad = np.deg2rad(bot_rot)
+                    facing_x = -np.sin(bot_rot_rad)
+                    facing_y = np.cos(bot_rot_rad)
+
+                    # Calculate direction to enemy (normalized)
+                    to_enemy_x = enemy_x - bot_x
+                    to_enemy_y = enemy_y - bot_y
+                    to_enemy_mag = np.sqrt(to_enemy_x**2 + to_enemy_y**2)
+                    to_enemy_x = to_enemy_x / (to_enemy_mag + 1e-10)  # Avoid division by zero
+                    to_enemy_y = to_enemy_y / (to_enemy_mag + 1e-10)
+
+                    # Calculate cosine of angle using dot product
+                    # cos(angle) = dot(facing_dir, to_enemy)
+                    cos_angle = facing_x * to_enemy_x + facing_y * to_enemy_y
+
+                    # Clamp to [0, 1] (as in C#: Mathf.Clamp01)
+                    cos_angle = np.clip(cos_angle, 0.0, 1.0)
+
+                    # Average across all collisions in this timebin
+                    avg_angle = float(np.mean(cos_angle[~np.isnan(cos_angle)]) if len(cos_angle) > 0 else np.nan)
                 else:
                     avg_angle = np.nan  # No collision data in this timebin
 
@@ -490,15 +566,16 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 else:
                     avg_velocity = np.nan  # No position data in this timebin
 
-                # Store factors with suffix
-                factors[f'CollisionRatio{bot_suffix}'] = collision_ratio
-                factors[f'AbilityRatio{bot_suffix}'] = ability_ratio
-                factors[f'Angle{bot_suffix}'] = avg_angle
-                factors[f'SafeDistance{bot_suffix}'] = avg_safe_distance
-                factors[f'ActionIntensity{bot_suffix}'] = action_intensity
-                factors[f'ActionDensity{bot_suffix}'] = action_density
-                factors[f'BotsDistance{bot_suffix}'] = avg_bots_distance
-                factors[f'Velocity{bot_suffix}'] = avg_velocity
+                # Normalize factors (matching C# behavior)
+                # Each factor is normalized individually before storing
+                factors[f'CollisionRatio{bot_suffix}'] = normalize_pacing_factor(collision_ratio, 'CollisionRatio')
+                factors[f'AbilityRatio{bot_suffix}'] = normalize_pacing_factor(ability_ratio, 'AbilityRatio')
+                factors[f'Angle{bot_suffix}'] = normalize_pacing_factor(avg_angle, 'Angle')
+                factors[f'SafeDistance{bot_suffix}'] = normalize_pacing_factor(avg_safe_distance, 'SafeDistance')
+                factors[f'ActionIntensity{bot_suffix}'] = normalize_pacing_factor(action_intensity, 'ActionIntensity')
+                factors[f'ActionDensity{bot_suffix}'] = normalize_pacing_factor(action_density, 'ActionDensity')
+                factors[f'BotsDistance{bot_suffix}'] = normalize_pacing_factor(avg_bots_distance, 'BotsDistance')
+                factors[f'Velocity{bot_suffix}'] = normalize_pacing_factor(avg_velocity, 'Velocity')
 
             # Append record
             pacing_fragment_list.append({
