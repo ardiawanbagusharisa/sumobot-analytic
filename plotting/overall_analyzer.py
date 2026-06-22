@@ -1418,9 +1418,17 @@ def plot_pacing_factors_per_bot_summary(
     # Helper function to normalize
     def normalize(values):
         """Normalize values to 0-1 range"""
-        vmin, vmax = values.min(), values.max()
+        # Use nanmin/nanmax to ignore NaN values
+        vmin, vmax = np.nanmin(values), np.nanmax(values)
+
+        # If all values are NaN, return zeros
+        if np.isnan(vmin) or np.isnan(vmax):
+            return np.zeros_like(values)
+
+        # If all values are the same, return zeros
         if vmax - vmin == 0:
             return np.zeros_like(values)
+
         return (values - vmin) / (vmax - vmin)
 
     # First pass: Calculate overall_avg for each bot
@@ -1467,8 +1475,12 @@ def plot_pacing_factors_per_bot_summary(
         # Calculate Average
         average_final = (tempo_final + threat_final) / 2
 
-        # Calculate overall average
-        overall_avg = np.mean(average_final)
+        # Calculate overall average (use nanmean to handle NaN values)
+        overall_avg = np.nanmean(average_final)
+
+        # If still NaN (all values were NaN), set to 0
+        if np.isnan(overall_avg):
+            overall_avg = 0.0
 
         bot_overall_avg[bot] = overall_avg
 
