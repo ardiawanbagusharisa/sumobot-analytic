@@ -1430,11 +1430,14 @@ def plot_pacing_factors_per_bot_summary(
 
         threat = np.mean(threat_values, axis=0) if threat_values else np.zeros(len(bot_df))
 
-        # Calculate Average
-        average = (tempo + threat) / 2
+        # Normalize tempo and threat first
+        tempo_norm = normalize(tempo)
+        threat_norm = normalize(threat)
 
-        # Normalize and calculate overall average
-        average_norm = normalize(average)
+        # Calculate Average from normalized values
+        average_norm = (tempo_norm + threat_norm) / 2
+
+        # Calculate overall average
         overall_avg = np.mean(average_norm)
 
         bot_overall_avg[bot] = overall_avg
@@ -1496,21 +1499,20 @@ def plot_pacing_factors_per_bot_summary(
 
         threat = np.mean(threat_values, axis=0) if threat_values else np.zeros(len(x))
 
-        # Calculate Average: average of tempo and threat
-        average = (tempo + threat) / 2
-
-        # Normalize all values
+        # Normalize tempo and threat first
         tempo_norm = normalize(tempo)
         threat_norm = normalize(threat)
-        average_norm = normalize(average)
+
+        # Calculate Average from normalized values (midpoint between normalized lines)
+        average_norm = (tempo_norm + threat_norm) / 2
 
         # Calculate overall average for this bot
         overall_avg = bot_overall_avg[bot]
 
         # Plot the three lines
-        ax.plot(x, tempo_norm, linewidth=2.5, color='red', label='Tempo', alpha=0.8)
-        ax.plot(x, threat_norm, linewidth=2.5, color='green', label='Threat', alpha=0.8)
-        ax.plot(x, average_norm, linewidth=2.5, color='blue', label='Average', alpha=0.8)
+        ax.plot(x, tempo_norm, linewidth=2.5, color='blue', label='Tempo', alpha=0.8)
+        ax.plot(x, threat_norm, linewidth=2.5, color='red', label='Threat', alpha=0.8)
+        ax.plot(x, average_norm, linewidth=2.5, color='green', label='Average', alpha=0.8)
 
         # Styling
         ax.set_title(f'{bot} - Pacing Factors (Normalized)\nOverall Average: {overall_avg:.3f}',
