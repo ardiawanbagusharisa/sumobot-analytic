@@ -1403,7 +1403,11 @@ def plot_pacing_factors_per_bot_summary(
     bot_overall_avg = {}
 
     for bot in df['Bot'].unique():
-        bot_df = df[df['Bot'] == bot].sort_values('TimeBin')
+        bot_df = df[df['Bot'] == bot].copy()
+
+        # Aggregate duplicate TimeBins by taking the mean of numeric columns only
+        bot_df = bot_df.groupby('TimeBin', as_index=False).mean(numeric_only=True)
+        bot_df = bot_df.sort_values('TimeBin')
 
         if bot_df.empty:
             continue
@@ -1460,7 +1464,11 @@ def plot_pacing_factors_per_bot_summary(
     figures = {}
 
     for bot in bots:
-        bot_df = df[df['Bot'] == bot].sort_values('TimeBin')
+        bot_df = df[df['Bot'] == bot].copy()
+
+        # Aggregate duplicate TimeBins by taking the mean of numeric columns only
+        bot_df = bot_df.groupby('TimeBin', as_index=False).mean(numeric_only=True)
+        bot_df = bot_df.sort_values('TimeBin')
 
         if bot_df.empty:
             continue
