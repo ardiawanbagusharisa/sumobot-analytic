@@ -32,6 +32,13 @@ BOT_MARKER_MAP = {
     "Bot_LLM_ActionGPT": "D",          # #11: LLM - Diamond
     "Bot_FSM": "v",          # #12: FSM - Triangle down
     "Bot_DQN": "d",          # #13: DQN - Thin diamond
+
+    # Competition
+    "DAPPO_Cimin": "d",
+    "FSM_Anandan": "P",
+    "NN_Hasan": "s",
+    "PPO_Lungky": "X",
+    "PPO_Nunu": "h",
 }
 
 # Default marker if bot not in map
@@ -80,6 +87,13 @@ BOT_COLOR_MAP = {
     "Bot_LLM_ActionGPT": "#aec7e8",         # Light Blue - #11
     "Bot_FSM": "#ffbb78",                   # Light Orange - #12
     "Bot_DQN": "#98df8a",                   # Light Green - #13
+
+    # Competition
+    "DAPPO_Cimin": "#d62728",
+    "FSM_Anandan": "#17becf",
+    "NN_Hasan": "#e377c2",
+    "PPO_Lungky": "#9467bd",
+    "PPO_Nunu": "#2ca02c",
 }
 
 # Default color if bot not in map
