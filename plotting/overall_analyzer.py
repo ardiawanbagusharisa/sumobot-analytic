@@ -1555,6 +1555,7 @@ def plot_pacing_factors_per_bot_summary(
         # Calculate Average (midpoint between tempo and threat)
         average_final = (tempo_final + threat_final) / 2
 
+
         # Calculate overall average for this bot
         overall_avg = bot_overall_avg[bot]
 

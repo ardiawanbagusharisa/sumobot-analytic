@@ -14,6 +14,8 @@ from functools import lru_cache
 import polars as pl
 import numpy as np
 import pandas as pd  # For pd.cut in time bins
+import json
+from pathlib import Path
 
 # Check if GPU support is available
 GPU_AVAILABLE = False
@@ -25,29 +27,19 @@ try:
 except Exception:
     print("Using CPU (GPU not available)")
 
-arena_center = np.array([0, 0])
-arena_radius = 4.73485
+# Load arena configuration from unified config.json
+_config_path = Path(__file__).parent.parent / "config.json"
+with open(_config_path, 'r') as f:
+    _config = json.load(f)
 
-# Pacing Factor Constraints (matching C# ConstraintConfig from JSON)
-# Each tuple is (min, max) for normalization
-PACING_CONSTRAINTS = {
-    # Threat factors
-    'CollisionRatio': (0.0, 1.0),
-    'AbilityRatio': (0.0, 0.2),
-    'Angle': (0.0, 1.0),  # Cosine-normalized angle (0 = perpendicular, 1 = aligned)
-    'SafeDistance': (1.0, 5.0),
-    # Tempo factors
-    'ActionIntensity': (0.0, 50.0),
-    'ActionDensity': (0.0, 1.0),  # Shannon entropy typically 0-1 for our action types
-    'BotsDistance': (1.0, 5.0),
-    'Velocity': (0.0, 10.0),
-}
+arena_center = np.array(_config['arena']['center'])
+arena_radius = _config['arena']['radius']
 
 # Factors that need inversion (1 - normalized_value)
 # In C#: Angle, SafeDistance, BotsDistance are inverted
 INVERTED_FACTORS = {'Angle', 'SafeDistance', 'BotsDistance'}
 
-def normalize_pacing_factor(value, factor_name):
+def normalize_pacing_factor(value, factor_name, constraints=None):
     """
     Normalize a pacing factor value to 0-1 range using constraints.
     Matches C# ConstraintMinMax.Normalize() behavior.
@@ -55,15 +47,20 @@ def normalize_pacing_factor(value, factor_name):
     Args:
         value: Raw factor value (can be NaN)
         factor_name: Name of the factor (without _L or _R suffix)
+        constraints: Dictionary of constraints {factor_name: (min, max)} or None for raw data
 
     Returns:
-        Normalized value in [0, 1] range, or NaN if input is NaN
+        Normalized value in [0, 1] range, NaN if input is NaN, or raw value if constraints is None
     """
     if np.isnan(value):
         return np.nan
 
+    # If constraints is None, return raw value (no normalization)
+    if constraints is None:
+        return float(value)
+
     # Get constraints for this factor
-    min_val, max_val = PACING_CONSTRAINTS.get(factor_name, (0.0, 1.0))
+    min_val, max_val = constraints.get(factor_name, (0.0, 1.0))
 
     # Normalize: (value - min) / (max - min)
     if max_val - min_val == 0:
@@ -365,7 +362,7 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
     return collision_fragment_list
 
 
-def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size, skip_initial=0.0):
+def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size, skip_initial=0.0, constraints=None, collision_window_n=1):
     """
     Process pacing factors per timebin for a single CSV/Parquet file
     Calculates and normalizes 8 pacing factors for both bots in each timebin:
@@ -382,6 +379,9 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         config: Configuration dictionary
         time_bin_size: Size of time bins in seconds
         skip_initial: Number of seconds to skip at the start (default: 0.0)
+        constraints: Dictionary of constraints {factor_name: (min, max)} or None for raw data (default: None)
+        collision_window_n: Number of seconds to look back for collision calculation (default: 1 second)
+                           e.g., at time 5s with N=3, collects collisions from [2s, 5s]
 
     Returns list of time-binned pacing factor records with normalized values (per matchup)
     """
@@ -446,10 +446,16 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             time_start = bins[i]
             time_end = bins[i + 1]
 
+            # Calculate collision window start (look back N seconds from current time_end)
+            # e.g., if collision_window_n=3 and time_end=5, window=[5-3, 5]=[2, 5]
+            # This collects all collisions in the past N seconds up to current time
+            collision_window_start = max(skip_initial, time_end - collision_window_n)
+
             # Filter data for this timebin
             action_bin = action_data[(action_data['UpdatedAt'] >= time_start) &
                                      (action_data['UpdatedAt'] < time_end)]
-            collision_bin = collision_data[(collision_data['UpdatedAt'] >= time_start) &
+            # Collision uses rolling N-second window ending at current time
+            collision_bin = collision_data[(collision_data['UpdatedAt'] >= collision_window_start) &
                                            (collision_data['UpdatedAt'] < time_end)]
             position_bin = position_data[(position_data['UpdatedAt'] >= time_start) &
                                          (position_data['UpdatedAt'] < time_end)]
@@ -568,14 +574,14 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
 
                 # Normalize factors (matching C# behavior)
                 # Each factor is normalized individually before storing
-                factors[f'CollisionRatio{bot_suffix}'] = normalize_pacing_factor(collision_ratio, 'CollisionRatio')
-                factors[f'AbilityRatio{bot_suffix}'] = normalize_pacing_factor(ability_ratio, 'AbilityRatio')
-                factors[f'Angle{bot_suffix}'] = normalize_pacing_factor(avg_angle, 'Angle')
-                factors[f'SafeDistance{bot_suffix}'] = normalize_pacing_factor(avg_safe_distance, 'SafeDistance')
-                factors[f'ActionIntensity{bot_suffix}'] = normalize_pacing_factor(action_intensity, 'ActionIntensity')
-                factors[f'ActionDensity{bot_suffix}'] = normalize_pacing_factor(action_density, 'ActionDensity')
-                factors[f'BotsDistance{bot_suffix}'] = normalize_pacing_factor(avg_bots_distance, 'BotsDistance')
-                factors[f'Velocity{bot_suffix}'] = normalize_pacing_factor(avg_velocity, 'Velocity')
+                factors[f'CollisionRatio{bot_suffix}'] = normalize_pacing_factor(collision_ratio, 'CollisionRatio', constraints)
+                factors[f'AbilityRatio{bot_suffix}'] = normalize_pacing_factor(ability_ratio, 'AbilityRatio', constraints)
+                factors[f'Angle{bot_suffix}'] = normalize_pacing_factor(avg_angle, 'Angle', constraints)
+                factors[f'SafeDistance{bot_suffix}'] = normalize_pacing_factor(avg_safe_distance, 'SafeDistance', constraints)
+                factors[f'ActionIntensity{bot_suffix}'] = normalize_pacing_factor(action_intensity, 'ActionIntensity', constraints)
+                factors[f'ActionDensity{bot_suffix}'] = normalize_pacing_factor(action_density, 'ActionDensity', constraints)
+                factors[f'BotsDistance{bot_suffix}'] = normalize_pacing_factor(avg_bots_distance, 'BotsDistance', constraints)
+                factors[f'Velocity{bot_suffix}'] = normalize_pacing_factor(avg_velocity, 'Velocity', constraints)
 
             # Append record
             pacing_fragment_list.append({
@@ -707,7 +713,7 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
-def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0):
+def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0, config_filter=None, constraints=None, collision_window_n=1):
     """
     Process pacing factors in batches with bot filtering option
 
@@ -719,6 +725,12 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
         bot_option: "all" for all bots, or specific bot name to filter (e.g., "BotA")
         input_format: "csv", "parquet", or "auto" to detect both
         skip_initial: Number of seconds to skip at the start to avoid initial bias (default: 0.0)
+        config_filter: Dictionary to filter configurations, e.g., {"Timer": [15, 30, 45, 60], "ActInterval": [0.1, 0.2, 0.5],
+                "Round": ["BestOf1", "BestOf3", "BestOf5"], "SkillLeft": ["Boost", "Stone"], "SkillRight": ["Boost", "Stone"]}
+                If None, no filtering is applied (default: None)
+        constraints: Dictionary of pacing constraints {factor_name: (min, max)} or None for raw data (default: None)
+        collision_window_n: Number of seconds to look back for collision calculation (default: 1 second)
+                           e.g., at time 5s with N=3, collects collisions from [2s, 5s]
     """
     if time_bin_size is None:
         raise ValueError("time_bin_size must be specified for pacing factor computation")
@@ -823,12 +835,31 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
                 # Parse config
                 config = parse_config_name_cached(config_folder)
 
+                # Apply config filter if specified
+                if config_filter is not None:
+                    # Check if config matches all filter criteria
+                    skip_file = False
+                    for key, allowed_values in config_filter.items():
+                        config_value = config.get(key)
+                        # Convert to string for comparison if Round or Skill fields
+                        if key in ["Round", "SkillLeft", "SkillRight"]:
+                            if config_value not in allowed_values:
+                                skip_file = True
+                                break
+                        else:
+                            # For numeric fields (Timer, ActInterval), check if value is in allowed list
+                            if config_value not in allowed_values:
+                                skip_file = True
+                                break
+                    if skip_file:
+                        continue
+
                 # Scan file (CSV or Parquet) with Polars lazy API
                 lf = scan_file(csv_path)
 
                 # Process pacing factors with current bin size
                 pacing_tb = process_pacing_factors_timebins_single_csv(
-                    lf, bot_a, bot_b, config, current_bin_size, skip_initial=skip_initial
+                    lf, bot_a, bot_b, config, current_bin_size, skip_initial=skip_initial, constraints=constraints, collision_window_n=collision_window_n
                 )
                 if pacing_tb:
                     pacing_fragment_list.extend(pacing_tb)

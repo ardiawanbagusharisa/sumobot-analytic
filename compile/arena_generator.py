@@ -7,6 +7,7 @@ import argparse
 import os
 import glob
 from tqdm import tqdm
+import json
 
 # Check if GPU support is available
 GPU_AVAILABLE = False
@@ -31,13 +32,15 @@ def collect_with_gpu(lf, streaming=True):
         return lf.collect(streaming=streaming)
 
 # =====================
-# Config
+# Config - Load from unified config.json
 # =====================
-arena_center = np.array([0, 0])
-arena_radius = 4.73485
+_config_path = Path(__file__).parent.parent / "config.json"
+with open(_config_path, 'r') as f:
+    _config = json.load(f)
 
-# Adjustable parameters
-tile_size = 0.7   # Larger = bigger heatmap tiles (lower resolution)
+arena_center = np.array(_config['arena']['center'])
+arena_radius = _config['arena']['radius']
+tile_size = _config['visualization']['tile_size']
 # arrow_size = 50   # Larger = longer arrows
 
 def scan_data_file(file_path):
