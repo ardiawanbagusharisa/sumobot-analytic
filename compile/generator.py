@@ -407,16 +407,20 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         if len(bins) < 2:
             continue
 
-        # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio) =====
+        # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio, Angle) =====
         action_data_lf = lf.filter(
             (pl.col("GameIndex") == game_idx) &
             (pl.col("Category") == "Action") &
             (pl.col("State").cast(pl.Int32) != 2) &  # Exclude state 2
             (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
-        ).select(["Actor", "UpdatedAt", "Name"])
+        ).select([
+            "Actor", "UpdatedAt", "Name",
+            "BotPosX", "BotPosY", "BotRot",
+            "EnemyBotPosX", "EnemyBotPosY"
+        ])
         action_data = collect_with_gpu(action_data_lf).to_pandas()
 
-        # ===== 2. COLLISION DATA (for CollisionRatio, Angle, SafeDistance) =====
+        # ===== 2. COLLISION DATA (for CollisionRatio) =====
         collision_data_lf = lf.filter(
             (pl.col("GameIndex") == game_idx) &
             (pl.col("Category") == "Collision") &
@@ -489,14 +493,14 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 else:
                     ability_ratio = np.nan  # No action data in this timebin
 
-                # 3. Angle: Average cosine-normalized angle (matching C# api.Angle(normalized: true))
-                if len(collision_actor) > 0:
-                    # Get bot rotation and positions
-                    bot_rot = collision_actor['BotRot'].values  # Degrees
-                    bot_x = collision_actor['BotPosX'].values
-                    bot_y = collision_actor['BotPosY'].values
-                    enemy_x = collision_actor['EnemyBotPosX'].values
-                    enemy_y = collision_actor['EnemyBotPosY'].values
+                # 3. Angle: Average cosine-normalized angle from action data (matching C# api.Angle(normalized: true))
+                if len(action_actor) > 0:
+                    # Get bot rotation and positions from action data
+                    bot_rot = action_actor['BotRot'].values  # Degrees
+                    bot_x = action_actor['BotPosX'].values
+                    bot_y = action_actor['BotPosY'].values
+                    enemy_x = action_actor['EnemyBotPosX'].values
+                    enemy_y = action_actor['EnemyBotPosY'].values
 
                     # Calculate bot's facing direction from rotation
                     # Unity: Quaternion.Euler(0, 0, zRot) * Vector2.up = (-sin(rot), cos(rot))
@@ -518,10 +522,10 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     # Clamp to [0, 1] (as in C#: Mathf.Clamp01)
                     cos_angle = np.clip(cos_angle, 0.0, 1.0)
 
-                    # Average across all collisions in this timebin
+                    # Average across all actions in this timebin
                     avg_angle = float(np.mean(cos_angle[~np.isnan(cos_angle)]) if len(cos_angle) > 0 else np.nan)
                 else:
-                    avg_angle = np.nan  # No collision data in this timebin
+                    avg_angle = np.nan  # No action data in this timebin
 
                 # 4. SafeDistance: Distance from arena edge (normalized)
                 # safedistance = abs(arena_radius - robot_distance_from_center) / arena_radius
