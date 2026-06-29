@@ -713,7 +713,7 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
-def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0, config_filter=None, constraints=None, collision_window_n=1):
+def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0, config_filter=None, constraints=None, collision_window_n=1, name=None):
     """
     Process pacing factors in batches with bot filtering option
 
@@ -731,6 +731,9 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
         constraints: Dictionary of pacing constraints {factor_name: (min, max)} or None for raw data (default: None)
         collision_window_n: Number of seconds to look back for collision calculation (default: 1 second)
                            e.g., at time 5s with N=3, collects collisions from [2s, 5s]
+        name: Optional name for organizing output in a subfolder (default: None)
+              If provided, output structure: checkpoint_dir/{name}/pacing_factors_{bin_size}/
+              If None, output structure: checkpoint_dir/pacing_factors_{bin_size}/
     """
     if time_bin_size is None:
         raise ValueError("time_bin_size must be specified for pacing factor computation")
@@ -791,7 +794,13 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
         # Create checkpoint dir for this bin size
         # Format: pacing_factors_1, pacing_factors_3, pacing_factors_5, etc.
         bin_size_str = str(current_bin_size).replace('.', '_')  # Handle decimals: 2.5 -> 2_5
-        pacing_factors_dir = os.path.join(checkpoint_dir, f"pacing_factors_{bin_size_str}")
+
+        # If name is provided, create a parent folder for it
+        if name is not None:
+            pacing_factors_dir = os.path.join(checkpoint_dir, name, f"pacing_factors_{bin_size_str}")
+        else:
+            pacing_factors_dir = os.path.join(checkpoint_dir, f"pacing_factors_{bin_size_str}")
+
         os.makedirs(pacing_factors_dir, exist_ok=True)
 
         # Determine which batches are already processed for this bin size
@@ -1135,7 +1144,7 @@ def create_summary_bot(matchup_summary, output_dir):
     return bot_summary
 
 
-def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_percentile=5, pacing_bin_size=None):
+def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_percentile=5, pacing_bin_size=None, name=None):
     """
     Generate timebin summaries from batched timebin checkpoints
     Loads batch files and creates final summaries
@@ -1147,6 +1156,9 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
         pacing_bin_size: Time bin size for pacing factors (e.g., 5 or "2_5" for 2.5s).
                         If None, uses default "pacing_factors" folder.
                         Can also be a list/array to process multiple bin sizes.
+        name: Optional name for organizing pacing outputs in a subfolder (default: None)
+              If provided, reads from checkpoint_dir/{name}/pacing_factors_{bin_size}/
+              and writes to output_dir/{name}/
     """
     print("=" * 60)
     print("🚀 Generating timebin summaries from batches")
@@ -1182,17 +1194,23 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
         else:
             bin_sizes = list(pacing_bin_size)
     else:
+        # Determine base path for pacing folders (with or without name)
+        base_pacing_path = os.path.join(checkpoint_dir, name) if name else checkpoint_dir
+
         # Try default folder first, then auto-detect folders
-        default_folder = os.path.join(checkpoint_dir, "pacing_factors")
+        default_folder = os.path.join(base_pacing_path, "pacing_factors")
         if os.path.exists(default_folder):
             bin_sizes = [None]  # Use default "pacing_factors" folder
         else:
             # Auto-detect pacing_factors_* folders
-            pacing_dirs = [d for d in os.listdir(checkpoint_dir) if d.startswith("pacing_factors_")]
-            if pacing_dirs:
-                # Extract bin sizes from folder names
-                bin_sizes = [d.replace("pacing_factors_", "") for d in pacing_dirs]
-                print(f"\n📂 Auto-detected pacing bin sizes: {bin_sizes}")
+            if os.path.exists(base_pacing_path):
+                pacing_dirs = [d for d in os.listdir(base_pacing_path) if d.startswith("pacing_factors_")]
+                if pacing_dirs:
+                    # Extract bin sizes from folder names
+                    bin_sizes = [d.replace("pacing_factors_", "") for d in pacing_dirs]
+                    print(f"\n📂 Auto-detected pacing bin sizes: {bin_sizes}")
+                else:
+                    bin_sizes = []
             else:
                 bin_sizes = []
 
@@ -1207,7 +1225,13 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
             pacing_folder = f"pacing_factors_{bin_size_str}"
             output_suffix = f"_{bin_size_str}"
 
-        pacing_batch_files = sorted(glob.glob(f"{checkpoint_dir}/{pacing_folder}/batch_*.csv"))
+        # Construct full path including name if provided
+        if name:
+            pacing_batch_path = os.path.join(checkpoint_dir, name, pacing_folder)
+        else:
+            pacing_batch_path = os.path.join(checkpoint_dir, pacing_folder)
+
+        pacing_batch_files = sorted(glob.glob(f"{pacing_batch_path}/batch_*.csv"))
 
         if pacing_batch_files:
             print(f"\n📂 Loading {len(pacing_batch_files)} pacing factors batch files (bin_size={bin_size or 'default'})...")
@@ -1245,8 +1269,12 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
             pacing_factors_df = pl.concat(pacing_dfs)
             print(f"Loaded {len(pacing_factors_df):,} pacing factor records")
 
+            # Create output directory for pacing (with name subfolder if provided)
+            pacing_output_dir = os.path.join(output_dir, name) if name else output_dir
+            os.makedirs(pacing_output_dir, exist_ok=True)
+
             print(f"\n Creating pacing factors summary (bin_size={bin_size or 'default'})...")
-            summarize_pacing_factors(pacing_factors_df, output_dir, pacing_ratio_percentile, output_suffix)
+            summarize_pacing_factors(pacing_factors_df, pacing_output_dir, pacing_ratio_percentile, output_suffix)
 
     print("\n" + "=" * 60)
     print("🎉 Done! Created:")
@@ -1255,9 +1283,10 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
     if collision_batch_files:
         print("   - summary_collision_timebins.csv")
     if bin_sizes:
+        pacing_path_prefix = f"{name}/" if name else ""
         for bin_size in bin_sizes:
             suffix = "" if bin_size is None else f"_{str(bin_size).replace('.', '_')}"
-            print(f"   - summary_pacing_per_bot{suffix}.csv")
+            print(f"   - {pacing_path_prefix}summary_pacing_per_bot{suffix}.csv")
     print("=" * 60)
 
 
