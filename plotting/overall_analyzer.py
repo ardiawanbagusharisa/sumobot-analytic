@@ -1407,7 +1407,7 @@ def plot_pacing_factors_per_bot_summary(
     factor_info = {
         'CollisionRatio': {'label': 'Collision Ratio'},
         'AbilityRatio': {'label': 'Ability Ratio'},
-        'Angle': {'label': 'Collision Angle'},
+        'Angle': {'label': 'Angle'},
         'SafeDistance': {'label': 'Safe Distance'},
         'ActionIntensity': {'label': 'Action Intensity'},
         'ActionDensity': {'label': 'Action Density'},
