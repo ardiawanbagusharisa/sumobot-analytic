@@ -528,7 +528,6 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     avg_angle = np.nan  # No action data in this timebin
 
                 # 4. SafeDistance: Distance from arena edge (normalized)
-                # safedistance = 1 - robot_distance_from_center / arena_radius (matches C#: 1 - dist/radius)
                 if len(position_actor) > 0:
                     bot_x = position_actor['BotPosX'].values
                     bot_y = position_actor['BotPosY'].values
@@ -536,7 +535,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                     # Calculate distance from arena center
                     distance_from_center = np.sqrt((bot_x - arena_center[0])**2 + (bot_y - arena_center[1])**2)
                     # Calculate normalized distance from edge (negative when out of bounds)
-                    safe_distances = (arena_radius - distance_from_center) / arena_radius
+                    safe_distances = np.abs(arena_radius - distance_from_center) / arena_radius
                     avg_safe_distance = float(np.mean(safe_distances[~np.isnan(safe_distances)]) if len(safe_distances) > 0 else np.nan)
                 else:
                     avg_safe_distance = np.nan  # No collision data in this timebin
