@@ -72,8 +72,8 @@ def normalize_pacing_factor(value, factor_name, constraints=None):
     normalized = np.clip(normalized, 0.0, 1.0)
 
     # Apply inversion if needed (matching C# behavior)
-    if factor_name in INVERTED_FACTORS:
-        normalized = 1.0 - normalized
+    # if factor_name in INVERTED_FACTORS:
+    #    normalized = 1.0 - normalized
 
     return float(normalized)
 
