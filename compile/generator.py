@@ -417,7 +417,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             "Actor", "UpdatedAt", "Name",
             "BotPosX", "BotPosY", "BotRot",
             "EnemyBotPosX", "EnemyBotPosY"
-        ])
+        ]).unique(subset=["Actor", "UpdatedAt", "Name"], keep="first")  # Guard against duplicate action logs for the same actor/action/timestamp
         action_data = collect_with_gpu(action_data_lf).to_pandas()
 
         # ===== 2. COLLISION DATA (for CollisionRatio) =====
@@ -430,7 +430,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             "Actor", "UpdatedAt", "ColTieBreaker", "ColActor",
             "BotPosX", "BotPosY", "BotRot", "BotLinv",
             "EnemyBotPosX", "EnemyBotPosY", "EnemyBotRot", "EnemyBotLinv"
-        ])
+        ]).unique(subset=["Actor", "UpdatedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
         collision_data = collect_with_gpu(collision_data_lf).to_pandas()
 
         # ===== 3. GENERAL POSITION DATA (for BotsDistance, Velocity) =====
