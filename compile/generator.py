@@ -408,17 +408,27 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             continue
 
         # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio, Angle) =====
-        action_data_lf = lf.filter(
+        # Older log versions logged every queued action instead of only the last one
+        # submitted per tick (StartedAt/UpdatedAt are set once per Update() call, so same
+        # Actor+Name+UpdatedAt rows belong to the same tick). Keep only the last-submitted
+        # row per tick, matching current InputProvider.Flush()'s "unique per tick" behavior.
+        action_data_lf = lf.with_row_index("_orig_idx").filter(
             (pl.col("GameIndex") == game_idx) &
             (pl.col("Category") == "Action") &
             (pl.col("State").cast(pl.Int32) != 2) &  # Exclude state 2
             (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
         ).select([
-            "Actor", "UpdatedAt", "Name",
+            "_orig_idx", "Actor", "UpdatedAt", "Name",
             "BotPosX", "BotPosY", "BotRot",
             "EnemyBotPosX", "EnemyBotPosY"
-        ]).unique(subset=["Actor", "UpdatedAt", "Name"], keep="first")  # Guard against duplicate action logs for the same actor/action/timestamp
-        action_data = collect_with_gpu(action_data_lf).to_pandas()
+        ])
+        action_data = (
+            collect_with_gpu(action_data_lf).to_pandas()
+            .sort_values("_orig_idx")
+            .groupby(["Actor", "Name", "UpdatedAt"], as_index=False, sort=False)
+            .tail(1)
+            .drop(columns="_orig_idx")
+        )
 
         # ===== 2. COLLISION DATA (for CollisionRatio) =====
         collision_data_lf = lf.filter(
@@ -442,7 +452,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             "Actor", "UpdatedAt",
             "BotPosX", "BotPosY", "BotLinv",
             "EnemyBotPosX", "EnemyBotPosY", "EnemyBotLinv"
-        ])
+        ]).unique(subset=["Actor", "UpdatedAt"], keep="first")  # Same-tick duplicates carry identical cached position/velocity, so any one is representative
         position_data = collect_with_gpu(position_data_lf).to_pandas()
 
         # Process each timebin
