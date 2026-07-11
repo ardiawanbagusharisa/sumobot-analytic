@@ -451,8 +451,14 @@ def plot_action_timebins_intensity(
     # --- Helper: apply x-axis cutoff ---
     def apply_timer_xlim(ax):
         if timer is not None:
-            ax.set_xlim(0, timer)
-            ax.set_xticks(range(0, int(timer) + 1, max(1, int(timer // 10) or 1)))
+            # TimeBin is labeled by bin start, so the last data point sits at
+            # (timer - time_bin_size), not timer. Cap the axis at the actual max
+            # TimeBin instead of the raw timer value to avoid trailing empty space.
+            upper = df["TimeBin"].max()
+            if pd.isna(upper):
+                upper = timer
+            ax.set_xlim(0, upper)
+            ax.set_xticks(range(0, int(upper) + 1, max(1, int(timer // 10) or 1)))
 
     # --- Plot modes ---
     if mode == "select":
@@ -1971,8 +1977,14 @@ def plot_collision_timebins_intensity(
     # --- Helper: apply x-axis cutoff ---
     def apply_timer_xlim(ax):
         if timer is not None:
-            ax.set_xlim(0, timer)
-            ax.set_xticks(range(0, int(timer) + 1, max(1, int(timer // 10) or 1)))
+            # TimeBin is labeled by bin start, so the last data point sits at
+            # (timer - time_bin_size), not timer. Cap the axis at the actual max
+            # TimeBin instead of the raw timer value to avoid trailing empty space.
+            upper = df["TimeBin"].max()
+            if pd.isna(upper):
+                upper = timer
+            ax.set_xlim(0, upper)
+            ax.set_xticks(range(0, int(upper) + 1, max(1, int(timer // 10) or 1)))
 
     # --- Plot modes ---
     if mode == "select":
