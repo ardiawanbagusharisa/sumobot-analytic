@@ -231,29 +231,37 @@ def process_batch_csvs(csv_paths, batch_checkpoint_dir="batched", time_bin_size=
 def process_action_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
     """
     Process action time bins for a single CSV file
-    Returns list of time-binned action records
+    Returns list of time-binned action-session records: one count per held action
+    overlapping a bin, not per raw resubmission tick (see build_action_sessions),
+    and split per (GameIndex, RoundIndex) since Best-of-N rounds each restart their
+    own StartedAt/UpdatedAt clock near 0.
     """
-    # Scan and filter for actions
-    raw_data = lf.filter(
-        (pl.col("Category") == "Action") & (pl.col("State").cast(pl.Int32) != 2)
-    ).select([
-        "GameIndex", "Actor", "UpdatedAt", "Name"
-    ])
-
-    # Add match duration per game
-    match_dur_lf = lf.group_by("GameIndex").agg([
+    match_dur_lf = lf.group_by(["GameIndex", "RoundIndex"]).agg([
         pl.col("UpdatedAt").max().alias("match_duration")
     ])
+    match_durations = collect_with_gpu(match_dur_lf)
 
-    raw_data = raw_data.join(match_dur_lf, on="GameIndex", how="left")
-    raw_data_df = collect_with_gpu(raw_data)
+    action_data_lf = lf.with_row_index("_orig_idx").filter(
+        (pl.col("Category") == "Action") & (pl.col("State").cast(pl.Int32) != 2)
+    ).select([
+        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "Duration", "Name"
+    ])
+    action_data_all = (
+        collect_with_gpu(action_data_lf).to_pandas()
+        .sort_values("_orig_idx")
+        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
+        .tail(1)
+        .drop(columns="_orig_idx")
+    )
+    action_sessions_all = build_action_sessions(action_data_all)
 
     time_fragment_list = []
 
-    # Process time bins per game
-    for game_idx in raw_data_df['GameIndex'].unique():
-        game_df = raw_data_df.filter(pl.col('GameIndex') == game_idx)
-        match_dur = game_df['match_duration'][0]
+    # Process time bins per (GameIndex, RoundIndex)
+    for game_idx, round_idx in zip(match_durations['GameIndex'], match_durations['RoundIndex']):
+        match_dur = match_durations.filter(
+            (pl.col('GameIndex') == game_idx) & (pl.col('RoundIndex') == round_idx)
+        )['match_duration'][0]
 
         # Use timer config to determine max time bin (cap at timer setting)
         timer_value = config.get('Timer')
@@ -263,32 +271,42 @@ def process_action_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
         if len(bins) < 2:
             continue
 
-        game_pd = game_df.to_pandas()
+        sessions = action_sessions_all[
+            (action_sessions_all['GameIndex'] == game_idx) & (action_sessions_all['RoundIndex'] == round_idx)
+        ]
+        if len(sessions) == 0:
+            continue
 
         for side in [0, 1]:
-            actor_data = game_pd[game_pd['Actor'] == side]
-            if len(actor_data) == 0:
+            actor_sessions = sessions[sessions['Actor'] == side]
+            if len(actor_sessions) == 0:
                 continue
 
-            actor_data = actor_data.copy()
-            actor_data['TimeBin'] = pd.cut(actor_data['UpdatedAt'], bins=bins,
-                                           labels=bins[:-1], include_lowest=True)
+            for i in range(len(bins) - 1):
+                time_start, time_end = bins[i], bins[i + 1]
+                # Sessions active/overlapping during this bin (not sessions that merely *start* in it)
+                bin_sessions = actor_sessions[
+                    (actor_sessions['SessionStart'] < time_end) & (actor_sessions['SessionEnd'] > time_start)
+                ]
+                if len(bin_sessions) == 0:
+                    continue
 
-            grouped = actor_data.groupby(['TimeBin', 'Name'], observed=False).size().reset_index(name='Count')
+                grouped = bin_sessions.groupby('Name', observed=False).size().reset_index(name='Count')
 
-            for _, row in grouped.iterrows():
-                time_fragment_list.append({
-                    'GameIndex': game_idx,
-                    'Bot': bot_a if side == 0 else bot_b,
-                    'Timer': config.get('Timer'),
-                    'ActInterval': config.get('ActInterval'),
-                    'Round': config.get('Round'),
-                    'SkillLeft': config.get('SkillLeft'),
-                    'SkillRight': config.get('SkillRight'),
-                    'TimeBin': float(row['TimeBin']),
-                    'Action': row['Name'],
-                    'Count': row['Count']
-                })
+                for _, row in grouped.iterrows():
+                    time_fragment_list.append({
+                        'GameIndex': game_idx,
+                        'RoundIndex': round_idx,
+                        'Bot': bot_a if side == 0 else bot_b,
+                        'Timer': config.get('Timer'),
+                        'ActInterval': config.get('ActInterval'),
+                        'Round': config.get('Round'),
+                        'SkillLeft': config.get('SkillLeft'),
+                        'SkillRight': config.get('SkillRight'),
+                        'TimeBin': float(time_start),
+                        'Action': row['Name'],
+                        'Count': row['Count']
+                    })
 
     return time_fragment_list
 
@@ -296,30 +314,30 @@ def process_action_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
 def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
     """
     Process collision time bins for a single CSV file
-    Returns list of time-binned collision records
+    Returns list of time-binned collision records, split per (GameIndex, RoundIndex)
+    since Best-of-N rounds each restart their own StartedAt/UpdatedAt clock near 0.
     """
+    match_dur_lf = lf.group_by(["GameIndex", "RoundIndex"]).agg([
+        pl.col("UpdatedAt").max().alias("match_duration")
+    ])
+    match_durations = collect_with_gpu(match_dur_lf)
+
     # Scan and filter for collisions
     # Cast State to string for consistent comparison (handles both CSV strings and Parquet types)
     raw_data = lf.filter(
         (pl.col("Category") == "Collision") & (pl.col("State").cast(pl.Utf8) == "0")
     ).select([
-        "GameIndex", "Actor", "ColTieBreaker", "ColActor", "UpdatedAt"
-    ])
-
-    # Add match duration per game
-    match_dur_lf = lf.group_by("GameIndex").agg([
-        pl.col("UpdatedAt").max().alias("match_duration")
-    ])
-
-    raw_data = raw_data.join(match_dur_lf, on="GameIndex", how="left")
+        "GameIndex", "RoundIndex", "Actor", "ColTieBreaker", "ColActor", "StartedAt"
+    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "StartedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
     raw_data_df = collect_with_gpu(raw_data)
 
     collision_fragment_list = []
 
-    # Process collision time bins per game
-    for game_idx in raw_data_df['GameIndex'].unique():
-        game_df = raw_data_df.filter(pl.col('GameIndex') == game_idx)
-        match_dur = game_df['match_duration'][0]
+    # Process collision time bins per (GameIndex, RoundIndex)
+    for game_idx, round_idx in zip(match_durations['GameIndex'], match_durations['RoundIndex']):
+        match_dur = match_durations.filter(
+            (pl.col('GameIndex') == game_idx) & (pl.col('RoundIndex') == round_idx)
+        )['match_duration'][0]
 
         # Use timer config to determine max time bin (cap at timer setting)
         timer_value = config.get('Timer')
@@ -329,15 +347,20 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
         if len(bins) < 2:
             continue
 
+        game_df = raw_data_df.filter(
+            (pl.col('GameIndex') == game_idx) & (pl.col('RoundIndex') == round_idx)
+        )
+        if len(game_df) == 0:
+            continue
+
         game_pd = game_df.to_pandas()
-        game_pd['TimeBin'] = pd.cut(game_pd['UpdatedAt'], bins=bins,
+        game_pd['TimeBin'] = pd.cut(game_pd['StartedAt'], bins=bins,
                                    labels=bins[:-1], include_lowest=True)
 
         for time_bin, bin_data in game_pd.groupby('TimeBin', observed=False):
             actor_L_count = len(bin_data[(bin_data['Actor'] == True) &
                                         (bin_data['ColTieBreaker'] == False) &
                                         (bin_data["ColActor"] == True)])
-            # print(f"actor_L_count {actor_L_count}")
             actor_R_count = len(bin_data[(bin_data['Actor'] == False) &
                                         (bin_data['ColTieBreaker'] == False) &
                                         (bin_data["ColActor"] == True)])
@@ -346,6 +369,7 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
 
             collision_fragment_list.append({
                 'GameIndex': game_idx,
+                'RoundIndex': round_idx,
                 'Bot_L': bot_a,
                 'Bot_R': bot_b,
                 'Timer': config.get('Timer'),
@@ -360,6 +384,38 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
             })
 
     return collision_fragment_list
+
+
+def build_action_sessions(action_df):
+    """
+    Collapse action rows into contiguous sessions per (GameIndex, RoundIndex, Actor, Name).
+
+    Some matchups (e.g. ones involving Bot_LLM_ActionGPT) resubmit the same held action
+    every simulation frame instead of once per ActInterval. SumoController.Log() kills and
+    re-logs a fresh row every time an already-active action is resubmitted, so a single
+    continuous "hold" gets fragmented into dozens of rows per second (verified: median
+    inter-row gap for those matchups is ~0.02s regardless of the configured ActInterval),
+    wildly inflating raw row counts. A row is a renewal of the current session (not a new
+    action) if it starts before every prior row in the group has already expired
+    (StartedAt + Duration); otherwise it starts a new session.
+    """
+    cols = ["GameIndex", "RoundIndex", "Actor", "Name", "SessionStart", "SessionEnd"]
+    if action_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    group_keys = ["GameIndex", "RoundIndex", "Actor", "Name"]
+    df = action_df.sort_values(group_keys + ["StartedAt"]).reset_index(drop=True)
+    df["_end"] = df["StartedAt"] + df["Duration"]
+    df["_running_end"] = df.groupby(group_keys)["_end"].cummax()
+    prev_running_end = df.groupby(group_keys)["_running_end"].shift(1)
+    df["_new_session"] = df["StartedAt"] > prev_running_end.fillna(-np.inf)
+    df["_session_id"] = df.groupby(group_keys)["_new_session"].cumsum()
+
+    sessions = df.groupby(group_keys + ["_session_id"], as_index=False).agg(
+        SessionStart=("StartedAt", "min"),
+        SessionEnd=("_end", "max"),
+    )
+    return sessions[cols]
 
 
 def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size, skip_initial=0.0, constraints=None, collision_window_n=1):
@@ -385,17 +441,76 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
 
     Returns list of time-binned pacing factor records with normalized values (per matchup)
     """
-    # Get match duration per game
-    match_dur_lf = lf.group_by("GameIndex").agg([
+    # Get match duration per (GameIndex, RoundIndex). Rounds in a Best-of-N match each
+    # restart their StartedAt/UpdatedAt clock near 0, so scoping only by GameIndex would
+    # blend up to N rounds' independent timelines into the same time bins, inflating any
+    # count-based factor (verified: up to ~4-5x inflation on Best-of-5 files).
+    match_dur_lf = lf.group_by(["GameIndex", "RoundIndex"]).agg([
         pl.col("UpdatedAt").max().alias("match_duration")
     ])
     match_durations = collect_with_gpu(match_dur_lf)
 
     pacing_fragment_list = []
 
-    # Process each game
-    for game_idx in match_durations['GameIndex']:
-        match_dur = match_durations.filter(pl.col('GameIndex') == game_idx)['match_duration'][0]
+    # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio, Angle) =====
+    # Older log versions logged every queued action instead of only the last one
+    # submitted per tick (StartedAt/UpdatedAt are set once per Update() call, so same
+    # Actor+Name+StartedAt rows belong to the same tick). Keep only the last-submitted
+    # row per tick, matching current InputProvider.Flush()'s "unique per tick" behavior.
+    action_data_lf = lf.with_row_index("_orig_idx").filter(
+        (pl.col("Category") == "Action") &
+        (pl.col("State").cast(pl.Int32) != 2) &  # Exclude state 2
+        (pl.col("StartedAt") >= skip_initial)  # Skip initial period
+    ).select([
+        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "Duration", "Name",
+        "BotPosX", "BotPosY", "BotRot",
+        "EnemyBotPosX", "EnemyBotPosY"
+    ])
+    action_data_all = (
+        collect_with_gpu(action_data_lf).to_pandas()
+        .sort_values("_orig_idx")
+        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
+        .tail(1)
+        .drop(columns="_orig_idx")
+    )
+
+    # Some matchups (e.g. involving Bot_LLM_ActionGPT) resubmit the same held action every
+    # simulation frame instead of once per ActInterval, so a single continuous hold gets
+    # fragmented into dozens of distinct-tick rows per second. Collapse those into sessions
+    # and count sessions overlapping a bin instead of raw rows for the count-based factors
+    # (ActionIntensity, ActionDensity, AbilityRatio), so a continuous hold counts once
+    # (per bin it overlaps) rather than once per frame.
+    action_sessions_all = build_action_sessions(action_data_all)
+
+    # ===== 2. COLLISION DATA (for CollisionRatio) =====
+    collision_data_lf = lf.filter(
+        (pl.col("Category") == "Collision") &
+        (pl.col("State").cast(pl.Utf8) == "0") &
+        (pl.col("StartedAt") >= skip_initial)  # Skip initial period
+    ).select([
+        "GameIndex", "RoundIndex", "Actor", "StartedAt", "ColTieBreaker", "ColActor",
+        "BotPosX", "BotPosY", "BotRot", "BotLinv",
+        "EnemyBotPosX", "EnemyBotPosY", "EnemyBotRot", "EnemyBotLinv"
+    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "StartedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
+    collision_data_all = collect_with_gpu(collision_data_lf).to_pandas()
+
+    # ===== 3. GENERAL POSITION DATA (for BotsDistance, Velocity) =====
+    # Sample from all categories to get average distance/velocity
+    position_data_lf = lf.filter(
+        (pl.col("StartedAt") >= skip_initial)  # Skip initial period
+    ).select([
+        "GameIndex", "RoundIndex", "Actor", "StartedAt",
+        "BotPosX", "BotPosY", "BotLinv",
+        "EnemyBotPosX", "EnemyBotPosY", "EnemyBotLinv"
+    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "StartedAt"], keep="first")  # Same-tick duplicates carry identical cached position/velocity, so any one is representative
+    position_data_all = collect_with_gpu(position_data_lf).to_pandas()
+
+    # Process each (GameIndex, RoundIndex) pair independently — each round's own clock
+    # restarts near StartedAt=0, so bins must be computed per round, not per game.
+    for game_idx, round_idx in zip(match_durations['GameIndex'], match_durations['RoundIndex']):
+        match_dur = match_durations.filter(
+            (pl.col('GameIndex') == game_idx) & (pl.col('RoundIndex') == round_idx)
+        )['match_duration'][0]
 
         # Use timer config to determine max time bin (cap at timer setting)
         timer_value = config.get('Timer')
@@ -407,53 +522,18 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
         if len(bins) < 2:
             continue
 
-        # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio, Angle) =====
-        # Older log versions logged every queued action instead of only the last one
-        # submitted per tick (StartedAt/UpdatedAt are set once per Update() call, so same
-        # Actor+Name+UpdatedAt rows belong to the same tick). Keep only the last-submitted
-        # row per tick, matching current InputProvider.Flush()'s "unique per tick" behavior.
-        action_data_lf = lf.with_row_index("_orig_idx").filter(
-            (pl.col("GameIndex") == game_idx) &
-            (pl.col("Category") == "Action") &
-            (pl.col("State").cast(pl.Int32) != 2) &  # Exclude state 2
-            (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
-        ).select([
-            "_orig_idx", "Actor", "UpdatedAt", "Name",
-            "BotPosX", "BotPosY", "BotRot",
-            "EnemyBotPosX", "EnemyBotPosY"
-        ])
-        action_data = (
-            collect_with_gpu(action_data_lf).to_pandas()
-            .sort_values("_orig_idx")
-            .groupby(["Actor", "Name", "UpdatedAt"], as_index=False, sort=False)
-            .tail(1)
-            .drop(columns="_orig_idx")
-        )
-
-        # ===== 2. COLLISION DATA (for CollisionRatio) =====
-        collision_data_lf = lf.filter(
-            (pl.col("GameIndex") == game_idx) &
-            (pl.col("Category") == "Collision") &
-            (pl.col("State").cast(pl.Utf8) == "0") &
-            (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
-        ).select([
-            "Actor", "UpdatedAt", "ColTieBreaker", "ColActor",
-            "BotPosX", "BotPosY", "BotRot", "BotLinv",
-            "EnemyBotPosX", "EnemyBotPosY", "EnemyBotRot", "EnemyBotLinv"
-        ]).unique(subset=["Actor", "UpdatedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
-        collision_data = collect_with_gpu(collision_data_lf).to_pandas()
-
-        # ===== 3. GENERAL POSITION DATA (for BotsDistance, Velocity) =====
-        # Sample from all categories to get average distance/velocity
-        position_data_lf = lf.filter(
-            (pl.col("GameIndex") == game_idx) &
-            (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
-        ).select([
-            "Actor", "UpdatedAt",
-            "BotPosX", "BotPosY", "BotLinv",
-            "EnemyBotPosX", "EnemyBotPosY", "EnemyBotLinv"
-        ]).unique(subset=["Actor", "UpdatedAt"], keep="first")  # Same-tick duplicates carry identical cached position/velocity, so any one is representative
-        position_data = collect_with_gpu(position_data_lf).to_pandas()
+        action_data = action_data_all[
+            (action_data_all['GameIndex'] == game_idx) & (action_data_all['RoundIndex'] == round_idx)
+        ]
+        action_sessions = action_sessions_all[
+            (action_sessions_all['GameIndex'] == game_idx) & (action_sessions_all['RoundIndex'] == round_idx)
+        ]
+        collision_data = collision_data_all[
+            (collision_data_all['GameIndex'] == game_idx) & (collision_data_all['RoundIndex'] == round_idx)
+        ]
+        position_data = position_data_all[
+            (position_data_all['GameIndex'] == game_idx) & (position_data_all['RoundIndex'] == round_idx)
+        ]
 
         # Process each timebin
         for i in range(len(bins) - 1):
@@ -466,13 +546,16 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             collision_window_start = max(skip_initial, time_end - collision_window_n)
 
             # Filter data for this timebin
-            action_bin = action_data[(action_data['UpdatedAt'] >= time_start) &
-                                     (action_data['UpdatedAt'] < time_end)]
+            action_bin = action_data[(action_data['StartedAt'] >= time_start) &
+                                     (action_data['StartedAt'] < time_end)]
             # Collision uses rolling N-second window ending at current time
-            collision_bin = collision_data[(collision_data['UpdatedAt'] >= collision_window_start) &
-                                           (collision_data['UpdatedAt'] < time_end)]
-            position_bin = position_data[(position_data['UpdatedAt'] >= time_start) &
-                                         (position_data['UpdatedAt'] < time_end)]
+            collision_bin = collision_data[(collision_data['StartedAt'] >= collision_window_start) &
+                                           (collision_data['StartedAt'] < time_end)]
+            position_bin = position_data[(position_data['StartedAt'] >= time_start) &
+                                         (position_data['StartedAt'] < time_end)]
+            # Sessions active/overlapping during this bin (not sessions that merely *start* in it)
+            sessions_bin = action_sessions[(action_sessions['SessionStart'] < time_end) &
+                                           (action_sessions['SessionEnd'] > time_start)]
 
             # Calculate factors for each bot (Actor 0 = Bot_L, Actor 1 = Bot_R)
             factors = {}
@@ -481,6 +564,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 action_actor = action_bin[action_bin['Actor'] == actor_id]
                 collision_actor = collision_bin[collision_bin['Actor'] == actor_id]
                 position_actor = position_bin[position_bin['Actor'] == actor_id]
+                sessions_actor = sessions_bin[sessions_bin['Actor'] == actor_id]
 
                 # ----- THREAT FACTORS -----
 
@@ -495,11 +579,11 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
                 else:
                     collision_ratio = np.nan  # No collision data in this timebin
 
-                # 2. AbilityRatio: (Dash + Skills) / Total actions
-                if len(action_actor) > 0:
-                    ability_actions = len(action_actor[action_actor['Name'].isin(['Dash', 'SkillBoost', 'SkillStone'])])
-                    total_actions = len(action_actor)
-                    ability_ratio = float(ability_actions / total_actions if total_actions > 0 else np.nan)
+                # 2. AbilityRatio: (Dash + Skills) / Total actions (session-based, see ActionIntensity)
+                if len(sessions_actor) > 0:
+                    ability_sessions = len(sessions_actor[sessions_actor['Name'].isin(['Dash', 'SkillBoost', 'SkillStone'])])
+                    total_sessions = len(sessions_actor)
+                    ability_ratio = float(ability_sessions / total_sessions if total_sessions > 0 else np.nan)
                 else:
                     ability_ratio = np.nan  # No action data in this timebin
 
@@ -552,16 +636,16 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
 
                 # ----- TEMPO FACTORS -----
 
-                # 5. ActionIntensity: Number of actions
-                if len(action_actor) > 0:
-                    action_intensity = float(len(action_actor))
+                # 5. ActionIntensity: Number of active sessions overlapping this bin
+                if len(sessions_actor) > 0:
+                    action_intensity = float(len(sessions_actor))
                 else:
                     action_intensity = np.nan  # No action data in this timebin
 
-                # 6. ActionDensity: Shannon entropy of action distribution
-                if len(action_actor) > 0:
-                    action_counts = action_actor['Name'].value_counts(normalize=True)
-                    entropy = -np.sum(action_counts * np.log2(action_counts + 1e-10))
+                # 6. ActionDensity: Shannon entropy of active-session Name distribution
+                if len(sessions_actor) > 0:
+                    session_counts = sessions_actor['Name'].value_counts(normalize=True)
+                    entropy = -np.sum(session_counts * np.log2(session_counts + 1e-10))
                     action_density = float(entropy)
                 else:
                     action_density = np.nan  # No action data in this timebin
@@ -600,6 +684,7 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             # Append record
             pacing_fragment_list.append({
                 'GameIndex': game_idx,
+                'RoundIndex': round_idx,
                 'Bot_L': bot_a,
                 'Bot_R': bot_b,
                 'Timer': config.get('Timer'),
@@ -618,28 +703,42 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     """
     Process a single CSV file using lazy evaluation
     Implements the same aggregation logic as process_all_games_sql
-    Each CSV can contain multiple games (GameIndex)
+    Each CSV can contain multiple games (GameIndex), and each game may span multiple
+    rounds (RoundIndex) in Best-of-N configs, each with its own StartedAt/UpdatedAt
+    clock restarting near 0 (same reasoning as process_pacing_factors_timebins_single_csv).
     """
 
-    # Filter for actions only
-    action_data = lf.filter(pl.col("Category") == "Action")
+    # ===== ACTION DATA =====
+    # Collapse resubmitted-every-frame holds into sessions (see build_action_sessions) so
+    # action counts/durations aren't inflated for matchups that resubmit a held action every
+    # simulation frame instead of once per ActInterval (e.g. Bot_LLM_ActionGPT).
+    action_data_lf = lf.with_row_index("_orig_idx").filter(
+        (pl.col("Category") == "Action") & (pl.col("State").cast(pl.Int32) != 2)
+    ).select([
+        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "Duration", "Name"
+    ])
+    action_data = (
+        collect_with_gpu(action_data_lf).to_pandas()
+        .sort_values("_orig_idx")
+        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
+        .tail(1)
+        .drop(columns="_orig_idx")
+    )
+    action_sessions = build_action_sessions(action_data)
+    action_sessions["SessionDuration"] = action_sessions["SessionEnd"] - action_sessions["SessionStart"]
+    # Totals are per GameIndex across all rounds, matching the existing game-level schema.
+    action_sessions_lf = pl.from_pandas(
+        action_sessions[["GameIndex", "Actor", "Name", "SessionDuration"]]
+    ).lazy()
 
-    # Compute durations with window function (lag by game/actor/name)
-    action_with_lag = action_data.with_columns([
-        pl.col("StartedAt").shift(1).over(["GameIndex", "Actor", "Name"], order_by="UpdatedAt").alias("prev_started_at")
+    # Actual durations per game/actor/action: one session's held time, summed
+    action_durations = action_sessions_lf.group_by(["GameIndex", "Actor", "Name"]).agg([
+        pl.col("SessionDuration").sum().alias("ActualDuration")
     ])
 
-    # Compute actual durations per game/actor/action
-    action_durations = action_with_lag.group_by(["GameIndex", "Actor", "Name"]).agg([
-        pl.when((pl.col("State").cast(pl.Int32) == 2) & pl.col("prev_started_at").is_not_null())
-          .then(pl.col("UpdatedAt") - pl.col("prev_started_at"))
-          .otherwise(0)
-          .sum()
-          .alias("ActualDuration")
-    ])
-
-    # Action counts per game/actor/action
-    action_counts = action_data.filter(pl.col("State").cast(pl.Int32) != 2).group_by(["GameIndex", "Actor", "Name"]).agg([
+    # Action counts per game/actor/action: one session == one held action, regardless of
+    # how many raw ticks it was fragmented across
+    action_counts = action_sessions_lf.group_by(["GameIndex", "Actor", "Name"]).agg([
         pl.len().alias("action_count")
     ])
 
@@ -654,11 +753,17 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
         pl.col("ColTieBreaker").cast(pl.Int32).fill_null(0).sum().alias("collision_tie")
     ])
 
-    # Game metadata (winner and duration per game)
-    game_meta = lf.group_by("GameIndex").agg([
-        pl.col("GameWinner").first().alias("Winner"),
-        pl.col("UpdatedAt").max().alias("MatchDur")
+    # Game metadata: winner per game, and total match duration summed across rounds
+    # (each round's UpdatedAt clock restarts near 0, so max() per GameIndex alone would
+    # only capture the longest single round, not the full Best-of-N match).
+    game_winner = lf.group_by("GameIndex").agg([
+        pl.col("GameWinner").first().alias("Winner")
     ])
+    game_meta = lf.group_by(["GameIndex", "RoundIndex"]).agg([
+        pl.col("UpdatedAt").max().alias("round_duration")
+    ]).group_by("GameIndex").agg([
+        pl.col("round_duration").sum().alias("MatchDur")
+    ]).join(game_winner, on="GameIndex", how="left")
 
     # Now aggregate durations and counts to game level
     game_durations = action_durations.group_by("GameIndex").agg([
@@ -1302,101 +1407,6 @@ def generate_timebins_from_batches(checkpoint_dir, output_dir, pacing_ratio_perc
             suffix = "" if bin_size is None else f"_{str(bin_size).replace('.', '_')}"
             print(f"   - {pacing_path_prefix}summary_pacing_per_bot{suffix}.csv")
     print("=" * 60)
-
-
-def compute_collision_time_bins_from_csvs(base_dir, time_bin_size=5):
-    """
-    Compute time-binned COLLISION data from CSV files.
-    """
-    # Find all CSV files
-    all_csvs = []
-    matchup_folders = [f for f in os.listdir(base_dir)
-                       if os.path.isdir(os.path.join(base_dir, f))]
-
-    for matchup_folder in matchup_folders:
-        matchup_path = os.path.join(base_dir, matchup_folder)
-        config_folders = [f for f in os.listdir(matchup_path)
-                         if os.path.isdir(os.path.join(matchup_path, f))]
-
-        for config_folder in config_folders:
-            config_path = os.path.join(matchup_path, config_folder)
-            csv_files = glob.glob(os.path.join(config_path, "*.csv"))
-            all_csvs.extend([(csv, matchup_folder, config_folder) for csv in csv_files])
-
-    print(f" Computing time-binned collision data from {len(all_csvs)} CSV files...")
-
-    collision_fragment_list = []
-
-    for csv_path, matchup_folder, config_folder in all_csvs:
-        match = re.match(r"(.+)_vs_(.+)", matchup_folder)
-        if not match:
-            continue
-        bot_a, bot_b = match.groups()
-
-        config = parse_config_name_cached(config_folder)
-
-        # Scan and filter for collisions
-        lf = scan_file(csv_path)
-        raw_data = lf.filter(
-            (pl.col("Category") == "Collision") & (pl.col("State").cast(pl.Utf8) == "0")
-        ).select([
-            "GameIndex", "Actor", "ColTieBreaker", "ColActor", "UpdatedAt"
-        ])
-
-        # Add match duration per game
-        match_dur_lf = lf.group_by("GameIndex").agg([
-            pl.col("UpdatedAt").max().alias("match_duration")
-        ])
-
-        raw_data = raw_data.join(match_dur_lf, on="GameIndex", how="left")
-        raw_data_df = collect_with_gpu(raw_data)
-
-        # Process collision time bins per game
-        for game_idx in raw_data_df['GameIndex'].unique():
-            game_df = raw_data_df.filter(pl.col('GameIndex') == game_idx)
-            match_dur = game_df['match_duration'][0]
-
-            # Use timer config to determine max time bin (cap at timer setting)
-            timer_value = config.get('Timer')
-            max_time = min(match_dur, timer_value) if timer_value else match_dur
-
-            bins = np.arange(0, max_time + time_bin_size, time_bin_size)
-            if len(bins) < 2:
-                continue
-
-            game_pd = game_df.to_pandas()
-            game_pd['TimeBin'] = pd.cut(game_pd['UpdatedAt'], bins=bins,
-                                       labels=bins[:-1], include_lowest=True)
-
-            for time_bin, bin_data in game_pd.groupby('TimeBin', observed=False):
-                actor_L_count = len(bin_data[(bin_data['Actor'] == "0") &
-                                            (bin_data['ColTieBreaker'] == "0") &
-                                            (bin_data["ColActor"] == "1")])
-                actor_R_count = len(bin_data[(bin_data['Actor'] == "1") &
-                                            (bin_data['ColTieBreaker'] == "0") &
-                                            (bin_data["ColActor"] == "1")])
-
-                tie = bin_data['ColTieBreaker'].sum() if 'ColTieBreaker' in bin_data.columns else 0
-
-                collision_fragment_list.append({
-                    'GameIndex': game_idx,
-                    'Bot_L': bot_a,
-                    'Bot_R': bot_b,
-                    'Timer': config.get('Timer'),
-                    'ActInterval': config.get('ActInterval'),
-                    'Round': config.get('Round'),
-                    'SkillLeft': config.get('SkillLeft'),
-                    'SkillRight': config.get('SkillRight'),
-                    'TimeBin': float(time_bin),
-                    'Actor_L': actor_L_count,
-                    'Actor_R': actor_R_count,
-                    'Tie': int(tie),
-                })
-
-    collision_fragment_df = pl.DataFrame(collision_fragment_list)
-    print(f"Computed {len(collision_fragment_df):,} collision time-binned records")
-
-    return collision_fragment_df
 
 
 def summarize_action_timebins(time_fragment_df, output_dir):
