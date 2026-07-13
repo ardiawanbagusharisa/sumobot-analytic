@@ -241,18 +241,14 @@ def process_action_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size):
     ])
     match_durations = collect_with_gpu(match_dur_lf)
 
+    # State==2 (release) rows are kept, not filtered out: build_action_sessions needs
+    # their UpdatedAt as the authoritative end-of-hold timestamp.
     action_data_lf = lf.with_row_index("_orig_idx").filter(
-        (pl.col("Category") == "Action") & (pl.col("State").cast(pl.Int32) != 2)
+        pl.col("Category") == "Action"
     ).select([
-        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "Duration", "Name"
+        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "UpdatedAt", "Duration", "Name", "State"
     ])
-    action_data_all = (
-        collect_with_gpu(action_data_lf).to_pandas()
-        .sort_values("_orig_idx")
-        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
-        .tail(1)
-        .drop(columns="_orig_idx")
-    )
+    action_data_all = _dedupe_action_ticks(collect_with_gpu(action_data_lf).to_pandas())
     action_sessions_all = build_action_sessions(action_data_all)
 
     time_fragment_list = []
@@ -324,11 +320,13 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
 
     # Scan and filter for collisions
     # Cast State to string for consistent comparison (handles both CSV strings and Parquet types)
+    # Collision rows don't carry a meaningful StartedAt (it's always 0 — verified across
+    # multiple matchup files); UpdatedAt is the actual collision timestamp.
     raw_data = lf.filter(
         (pl.col("Category") == "Collision") & (pl.col("State").cast(pl.Utf8) == "0")
     ).select([
-        "GameIndex", "RoundIndex", "Actor", "ColTieBreaker", "ColActor", "StartedAt"
-    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "StartedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
+        "GameIndex", "RoundIndex", "Actor", "ColTieBreaker", "ColActor", "UpdatedAt"
+    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "UpdatedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
     raw_data_df = collect_with_gpu(raw_data)
 
     collision_fragment_list = []
@@ -354,7 +352,7 @@ def process_collision_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_siz
             continue
 
         game_pd = game_df.to_pandas()
-        game_pd['TimeBin'] = pd.cut(game_pd['StartedAt'], bins=bins,
+        game_pd['TimeBin'] = pd.cut(game_pd['UpdatedAt'], bins=bins,
                                    labels=bins[:-1], include_lowest=True)
 
         for time_bin, bin_data in game_pd.groupby('TimeBin', observed=False):
@@ -398,6 +396,15 @@ def build_action_sessions(action_df):
     wildly inflating raw row counts. A row is a renewal of the current session (not a new
     action) if it starts before every prior row in the group has already expired
     (StartedAt + Duration); otherwise it starts a new session.
+
+    Duration on a live (State 0/1) row is only a forward-looking "valid until" estimate —
+    it's ~ActInterval-sized and resets on every renewal. The State==2 row that closes a
+    session is the one authoritative signal for when the hold actually ended, and its own
+    Duration is stale (still the last renewal's estimate), understating true elapsed hold
+    time by up to hundreds of ms (verified against raw logs: a hold renewed at t=0.22 with
+    Duration=0.1 didn't actually release until UpdatedAt=0.79). So the terminal row's
+    UpdatedAt is used as its end instead of StartedAt + Duration; requires the input to
+    include State==2 rows (do not filter them out before calling this) and a State column.
     """
     cols = ["GameIndex", "RoundIndex", "Actor", "Name", "SessionStart", "SessionEnd"]
     if action_df.empty:
@@ -405,7 +412,8 @@ def build_action_sessions(action_df):
 
     group_keys = ["GameIndex", "RoundIndex", "Actor", "Name"]
     df = action_df.sort_values(group_keys + ["StartedAt"]).reset_index(drop=True)
-    df["_end"] = df["StartedAt"] + df["Duration"]
+    is_terminal = df["State"].astype(int) == 2
+    df["_end"] = np.where(is_terminal, df["UpdatedAt"], df["StartedAt"] + df["Duration"])
     df["_running_end"] = df.groupby(group_keys)["_end"].cummax()
     prev_running_end = df.groupby(group_keys)["_running_end"].shift(1)
     df["_new_session"] = df["StartedAt"] > prev_running_end.fillna(-np.inf)
@@ -416,6 +424,24 @@ def build_action_sessions(action_df):
         SessionEnd=("_end", "max"),
     )
     return sessions[cols]
+
+
+def _dedupe_action_ticks(df):
+    """
+    Keep exactly one row per (GameIndex, RoundIndex, Actor, Name, StartedAt) tick.
+    Older log versions logged every queued action instead of only the last one submitted
+    per tick. A State==2 (release) row must win any same-tick tie against a State 0/1 row,
+    since it carries the authoritative end-of-hold UpdatedAt that build_action_sessions
+    needs — losing it to an arbitrary row-order tiebreak would silently reintroduce the
+    stale-Duration session-end bug.
+    """
+    return (
+        df.assign(_is_terminal=(df["State"].astype(int) == 2).astype(int))
+        .sort_values(["_is_terminal", "_orig_idx"])
+        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
+        .tail(1)
+        .drop(columns=["_orig_idx", "_is_terminal"])
+    )
 
 
 def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bin_size, skip_initial=0.0, constraints=None, collision_window_n=1):
@@ -452,27 +478,28 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
 
     pacing_fragment_list = []
 
+    # ActInterval-sized "decision tick" unit for ActionIntensity/ActionDensity: a session's
+    # overlap with a bin is expressed in units of this size rather than as a raw session
+    # count, so a continuous hold spanning the whole bin scores ~bin_size/ActInterval
+    # (matching how many decisions it represents) instead of a flat 1 regardless of length.
+    act_interval = config.get('ActInterval') or 1.0
+
     # ===== 1. ACTION DATA (for ActionIntensity, ActionDensity, AbilityRatio, Angle) =====
     # Older log versions logged every queued action instead of only the last one
     # submitted per tick (StartedAt/UpdatedAt are set once per Update() call, so same
     # Actor+Name+StartedAt rows belong to the same tick). Keep only the last-submitted
     # row per tick, matching current InputProvider.Flush()'s "unique per tick" behavior.
+    # State==2 (release) rows are kept, not filtered out: build_action_sessions needs
+    # their UpdatedAt as the authoritative end-of-hold timestamp.
     action_data_lf = lf.with_row_index("_orig_idx").filter(
         (pl.col("Category") == "Action") &
-        (pl.col("State").cast(pl.Int32) != 2) &  # Exclude state 2
         (pl.col("StartedAt") >= skip_initial)  # Skip initial period
     ).select([
-        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "Duration", "Name",
+        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "UpdatedAt", "Duration", "Name", "State",
         "BotPosX", "BotPosY", "BotRot",
         "EnemyBotPosX", "EnemyBotPosY"
     ])
-    action_data_all = (
-        collect_with_gpu(action_data_lf).to_pandas()
-        .sort_values("_orig_idx")
-        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
-        .tail(1)
-        .drop(columns="_orig_idx")
-    )
+    action_data_all = _dedupe_action_ticks(collect_with_gpu(action_data_lf).to_pandas())
 
     # Some matchups (e.g. involving Bot_LLM_ActionGPT) resubmit the same held action every
     # simulation frame instead of once per ActInterval, so a single continuous hold gets
@@ -483,15 +510,19 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
     action_sessions_all = build_action_sessions(action_data_all)
 
     # ===== 2. COLLISION DATA (for CollisionRatio) =====
+    # Collision rows don't carry a meaningful StartedAt (it's always 0 — verified across
+    # multiple matchup files); UpdatedAt is the actual collision timestamp, unlike Action
+    # rows where StartedAt is the real per-row time. Binning/filtering on StartedAt would
+    # make every collision only ever visible in a window that reaches back to t=0.
     collision_data_lf = lf.filter(
         (pl.col("Category") == "Collision") &
         (pl.col("State").cast(pl.Utf8) == "0") &
-        (pl.col("StartedAt") >= skip_initial)  # Skip initial period
+        (pl.col("UpdatedAt") >= skip_initial)  # Skip initial period
     ).select([
-        "GameIndex", "RoundIndex", "Actor", "StartedAt", "ColTieBreaker", "ColActor",
+        "GameIndex", "RoundIndex", "Actor", "UpdatedAt", "ColTieBreaker", "ColActor",
         "BotPosX", "BotPosY", "BotRot", "BotLinv",
         "EnemyBotPosX", "EnemyBotPosY", "EnemyBotRot", "EnemyBotLinv"
-    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "StartedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
+    ]).unique(subset=["GameIndex", "RoundIndex", "Actor", "UpdatedAt"], keep="first")  # Guard against duplicate collision logs (e.g. re-fired OnCollisionEnter2D) for the same actor/timestamp
     collision_data_all = collect_with_gpu(collision_data_lf).to_pandas()
 
     # ===== 3. GENERAL POSITION DATA (for BotsDistance, Velocity) =====
@@ -549,8 +580,8 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
             action_bin = action_data[(action_data['StartedAt'] >= time_start) &
                                      (action_data['StartedAt'] < time_end)]
             # Collision uses rolling N-second window ending at current time
-            collision_bin = collision_data[(collision_data['StartedAt'] >= collision_window_start) &
-                                           (collision_data['StartedAt'] < time_end)]
+            collision_bin = collision_data[(collision_data['UpdatedAt'] >= collision_window_start) &
+                                           (collision_data['UpdatedAt'] < time_end)]
             position_bin = position_data[(position_data['StartedAt'] >= time_start) &
                                          (position_data['StartedAt'] < time_end)]
             # Sessions active/overlapping during this bin (not sessions that merely *start* in it)
@@ -636,16 +667,30 @@ def process_pacing_factors_timebins_single_csv(lf, bot_a, bot_b, config, time_bi
 
                 # ----- TEMPO FACTORS -----
 
-                # 5. ActionIntensity: Number of active sessions overlapping this bin
+                # 5. ActionIntensity: sessions' overlap with this bin, in ActInterval-sized
+                # decision-tick units rather than a raw session count — a continuous 5s hold
+                # at ActInterval=0.1 scores ~50 (one per decision it represents) instead of a
+                # flat 1, while a hold resubmitted every simulation frame (see
+                # build_action_sessions) still only scores per ActInterval, not per frame.
                 if len(sessions_actor) > 0:
-                    action_intensity = float(len(sessions_actor))
+                    overlap = np.clip(
+                        np.minimum(sessions_actor['SessionEnd'].values, time_end)
+                        - np.maximum(sessions_actor['SessionStart'].values, time_start),
+                        0, None
+                    )
+                    ticks = overlap / act_interval
+                    action_intensity = float(ticks.sum())
                 else:
+                    ticks = None
                     action_intensity = np.nan  # No action data in this timebin
 
-                # 6. ActionDensity: Shannon entropy of active-session Name distribution
-                if len(sessions_actor) > 0:
-                    session_counts = sessions_actor['Name'].value_counts(normalize=True)
-                    entropy = -np.sum(session_counts * np.log2(session_counts + 1e-10))
+                # 6. ActionDensity: Shannon entropy of the tick-weighted active-session Name
+                # distribution (same weighting as ActionIntensity, so a Name held longer
+                # contributes more probability mass than one merely tapped once)
+                if ticks is not None and ticks.sum() > 0:
+                    weighted = pd.Series(ticks).groupby(sessions_actor['Name'].values).sum()
+                    name_probs = weighted / weighted.sum()
+                    entropy = -np.sum(name_probs * np.log2(name_probs + 1e-10))
                     action_density = float(entropy)
                 else:
                     action_density = np.nan  # No action data in this timebin
@@ -712,18 +757,14 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     # Collapse resubmitted-every-frame holds into sessions (see build_action_sessions) so
     # action counts/durations aren't inflated for matchups that resubmit a held action every
     # simulation frame instead of once per ActInterval (e.g. Bot_LLM_ActionGPT).
+    # State==2 (release) rows are kept, not filtered out: build_action_sessions needs
+    # their UpdatedAt as the authoritative end-of-hold timestamp.
     action_data_lf = lf.with_row_index("_orig_idx").filter(
-        (pl.col("Category") == "Action") & (pl.col("State").cast(pl.Int32) != 2)
+        pl.col("Category") == "Action"
     ).select([
-        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "Duration", "Name"
+        "_orig_idx", "GameIndex", "RoundIndex", "Actor", "StartedAt", "UpdatedAt", "Duration", "Name", "State"
     ])
-    action_data = (
-        collect_with_gpu(action_data_lf).to_pandas()
-        .sort_values("_orig_idx")
-        .groupby(["GameIndex", "RoundIndex", "Actor", "Name", "StartedAt"], as_index=False, sort=False)
-        .tail(1)
-        .drop(columns="_orig_idx")
-    )
+    action_data = _dedupe_action_ticks(collect_with_gpu(action_data_lf).to_pandas())
     action_sessions = build_action_sessions(action_data)
     action_sessions["SessionDuration"] = action_sessions["SessionEnd"] - action_sessions["SessionStart"]
     # Totals are per GameIndex across all rounds, matching the existing game-level schema.
