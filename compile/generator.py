@@ -873,7 +873,7 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
-def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0, config_filter=None, constraints=None, collision_window_n=1, name=None):
+def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0, config_filter=None, collision_window_n=1, name=None):
     """
     Process pacing factors in batches with bot filtering option
 
@@ -881,30 +881,26 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
         base_dir: Base directory containing simulation data
         batch_size: Number of files per batch
         checkpoint_dir: Directory to save checkpoints
-        time_bin_size: Size of time bins for pacing factors (single value or list/array of values, e.g., [1, 3, 5])
+        time_bin_size: Dict mapping each time bin size (seconds) to the constraints to
+            normalize with at that bin size, e.g.:
+                {1: constraints_default, 5: constraints_nn, 10: None}
+            A None constraints value means raw (unnormalized) pacing factors for that bin size.
         bot_option: "all" for all bots, or specific bot name to filter (e.g., "BotA")
         input_format: "csv", "parquet", or "auto" to detect both
         skip_initial: Number of seconds to skip at the start to avoid initial bias (default: 0.0)
         config_filter: Dictionary to filter configurations, e.g., {"Timer": [15, 30, 45, 60], "ActInterval": [0.1, 0.2, 0.5],
                 "Round": ["BestOf1", "BestOf3", "BestOf5"], "SkillLeft": ["Boost", "Stone"], "SkillRight": ["Boost", "Stone"]}
                 If None, no filtering is applied (default: None)
-        constraints: Dictionary of pacing constraints {factor_name: (min, max)} or None for raw data (default: None)
         collision_window_n: Number of seconds to look back for collision calculation (default: 1 second)
                            e.g., at time 5s with N=3, collects collisions from [2s, 5s]
         name: Optional name for organizing output in a subfolder (default: None)
               If provided, output structure: checkpoint_dir/{name}/pacing_factors_{bin_size}/
               If None, output structure: checkpoint_dir/pacing_factors_{bin_size}/
     """
-    if time_bin_size is None:
-        raise ValueError("time_bin_size must be specified for pacing factor computation")
+    if not time_bin_size:
+        raise ValueError("time_bin_size must be a dict of {bin_size: constraints_or_None}")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
-
-    # Convert time_bin_size to list if it's a single value
-    if isinstance(time_bin_size, (int, float)):
-        time_bin_sizes = [time_bin_size]
-    else:
-        time_bin_sizes = list(time_bin_size)
 
     # Find all data files grouped by matchup/config (do this once)
     all_files = []
@@ -945,10 +941,11 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
     bot_filter_msg = f"for bot '{bot_option}'" if bot_option != "all" else "for all bots"
     print(f"Found {len(all_files)} {file_type} files to process {bot_filter_msg}")
 
-    # Process for each time bin size
-    for current_bin_size in time_bin_sizes:
+    # Process for each time bin size, using the constraints tied to it
+    for current_bin_size, current_constraints in time_bin_size.items():
         print(f"\n{'='*60}")
-        print(f"Processing with time_bin_size = {current_bin_size}s")
+        print(f"Processing with time_bin_size = {current_bin_size}s"
+              f" ({'raw' if current_constraints is None else 'normalized'})")
         print(f"{'='*60}")
 
         # Create checkpoint dir for this bin size
@@ -1028,7 +1025,7 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
 
                 # Process pacing factors with current bin size
                 pacing_tb = process_pacing_factors_timebins_single_csv(
-                    lf, bot_a, bot_b, config, current_bin_size, skip_initial=skip_initial, constraints=constraints, collision_window_n=collision_window_n
+                    lf, bot_a, bot_b, config, current_bin_size, skip_initial=skip_initial, constraints=current_constraints, collision_window_n=collision_window_n
                 )
                 if pacing_tb:
                     pacing_fragment_list.extend(pacing_tb)
@@ -1689,12 +1686,12 @@ if __name__ == "__main__":
             generate_timebins_from_batches(checkpoint_dir,output_dir)
 
         elif command == "batch_pacing_all":
-            # Batch process pacing factors for all bots
+            # Batch process pacing factors for all bots (raw, no constraints)
             batch_process_pacing(base_dir, batch_size=batch_size,
-                               time_bin_size=timebin_size, bot_option="all", checkpoint_dir=checkpoint_dir)
+                               time_bin_size={timebin_size: None}, bot_option="all", checkpoint_dir=checkpoint_dir)
 
         elif command == "batch_pacing_bot":
-            # Batch process pacing factors for specific bot
+            # Batch process pacing factors for specific bot (raw, no constraints)
             if len(sys.argv) < 3:
                 print("Error: Please specify a bot name")
                 print("Usage: python generator_polars_gpu.py batch_pacing_bot <bot_name>")
@@ -1702,7 +1699,7 @@ if __name__ == "__main__":
             else:
                 bot_name = sys.argv[2]
                 batch_process_pacing(base_dir, batch_size=batch_size,
-                                   time_bin_size=timebin_size, bot_option=bot_name, checkpoint_dir=checkpoint_dir)
+                                   time_bin_size={timebin_size: None}, bot_option=bot_name, checkpoint_dir=checkpoint_dir)
 
         else:
             is_valid_process = False
