@@ -78,6 +78,7 @@ def load_data_chunked(csv_path, chunksize=50000, actor_filter=None):
     # This is critical for 135GB files - we only load what we need
     lf = lf.select([
         "GameIndex",     # For grouping by game
+        "RoundIndex",    # Rounds in Best-of-N matches restart their own UpdatedAt clock near 0
         "UpdatedAt",     # For time-based analysis
         "Actor",         # For filtering by bot
         "BotPosX",       # X position
@@ -101,15 +102,20 @@ def load_data_chunked(csv_path, chunksize=50000, actor_filter=None):
 
 def split_into_phases(df, num_phases=3):
     """
-    Split game data into phases based on UpdatedAt time PER GAME.
-    Each game (GameIndex) is split into early/mid/late phases independently.
+    Split game data into phases based on UpdatedAt time, computed independently PER
+    (GameIndex, RoundIndex). Best-of-N rounds each restart their own UpdatedAt clock near
+    0, so phases must be computed per round: splitting per GameIndex alone would blend a
+    round that ends quickly (e.g. a fast KO) with a longer round in the same game, letting
+    the longer round's time range dictate where the short round's early/mid/late
+    boundaries fall.
 
     Args:
-        df: Polars DataFrame with game data (must have GameIndex and UpdatedAt columns)
+        df: Polars DataFrame with game data (must have GameIndex and UpdatedAt columns;
+            RoundIndex is used for per-round splitting when present)
         num_phases: Number of phases to split into (default: 3 for early/mid/late)
 
     Returns:
-        List of Polars DataFrames, one per phase (aggregated across all games)
+        List of Polars DataFrames, one per phase (aggregated across all games/rounds)
     """
     if df.is_empty():
         return [pl.DataFrame()] * num_phases
@@ -117,38 +123,42 @@ def split_into_phases(df, num_phases=3):
     # Initialize phase containers
     phases = [[] for _ in range(num_phases)]
 
-    # Process each game independently
-    for game_idx in df["GameIndex"].unique().to_list():
-        game_df = df.filter(pl.col("GameIndex") == game_idx)
+    group_cols = ["GameIndex", "RoundIndex"] if "RoundIndex" in df.columns else ["GameIndex"]
 
-        if game_df.is_empty():
+    # Process each (game, round) independently
+    for group_key in df.select(group_cols).unique().rows():
+        group_df = df.filter(
+            pl.all_horizontal([pl.col(c) == v for c, v in zip(group_cols, group_key)])
+        )
+
+        if group_df.is_empty():
             continue
 
-        # Calculate time boundaries for THIS game
-        min_time = game_df["UpdatedAt"].min()
-        max_time = game_df["UpdatedAt"].max()
+        # Calculate time boundaries for THIS game/round
+        min_time = group_df["UpdatedAt"].min()
+        max_time = group_df["UpdatedAt"].max()
         time_range = max_time - min_time
 
         # Avoid division by zero for games with no time range
         if time_range == 0:
             # Put all data in the first phase
-            phases[0].append(game_df)
+            phases[0].append(group_df)
             continue
 
         phase_size = time_range / num_phases
 
-        # Split this game into phases
+        # Split this game/round into phases
         for i in range(num_phases):
             phase_start = min_time + (i * phase_size)
             phase_end = min_time + ((i + 1) * phase_size)
 
             if i == num_phases - 1:
                 # Include the last timestamp in the final phase
-                phase_df = game_df.filter(
+                phase_df = group_df.filter(
                     (pl.col("UpdatedAt") >= phase_start) & (pl.col("UpdatedAt") <= phase_end)
                 )
             else:
-                phase_df = game_df.filter(
+                phase_df = group_df.filter(
                     (pl.col("UpdatedAt") >= phase_start) & (pl.col("UpdatedAt") < phase_end)
                 )
 
@@ -611,6 +621,106 @@ def load_bot_data_from_simulation(base_dir, bot_name, actor_position="left", chu
         return df_combined
 
 
+def load_all_bots_data_from_simulation(base_dir, chunksize=50000, max_configs=None, group_by_timer=False, also_load_distance=False, input_format="auto", filter_matchups=None):
+    """
+    Load position data across every matchup in the simulation directory, pooling both
+    bots' data together (bot identity is not preserved). Used to build an aggregate
+    "all bots combined" view alongside the per-bot ones from load_bot_data_from_simulation.
+
+    Args:
+        base_dir: Base simulation directory
+        chunksize: Chunk size for reading files (ignored for Parquet)
+        max_configs: Maximum number of config folders to process per matchup (None for all)
+        group_by_timer: If True, return dict of {timer_value: DataFrame}, else return combined DataFrame
+        also_load_distance: If True, also return timer-grouped distance-between-bots data
+        input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
+        filter_matchups: Optional list of matchup folder names to restrict to
+
+    Returns:
+        Combined DataFrame with all position data (both actors, every matchup), or dict of
+        DataFrames grouped by Timer. If also_load_distance=True, returns tuple:
+        (position_data, distance_data)
+    """
+    all_data = []
+    timer_grouped_data = {}
+    timer_distance_data = {}
+
+    matchup_folders = [f for f in os.listdir(base_dir)
+                      if os.path.isdir(os.path.join(base_dir, f)) and "_vs_" in f]
+    if filter_matchups:
+        matchup_folders = [m for m in matchup_folders if m in filter_matchups]
+
+    print(f"Found {len(matchup_folders)} matchup folders")
+
+    total_files = 0
+    for matchup_folder in matchup_folders:
+        matchup_path = os.path.join(base_dir, matchup_folder)
+        config_folders = [f for f in os.listdir(matchup_path)
+                         if os.path.isdir(os.path.join(matchup_path, f))]
+        if max_configs:
+            config_folders = config_folders[:max_configs]
+
+        for config_folder in tqdm(config_folders, desc=f"  Loading {matchup_folder}", leave=False):
+            config_path = os.path.join(matchup_path, config_folder)
+
+            if input_format == "parquet":
+                data_files = glob.glob(os.path.join(config_path, "*.parquet"))
+            elif input_format == "csv":
+                data_files = glob.glob(os.path.join(config_path, "*.csv"))
+            else:  # "auto" - prefer parquet
+                parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
+                csv_files = glob.glob(os.path.join(config_path, "*.csv"))
+                data_files = parquet_files if parquet_files else csv_files
+
+            if not data_files:
+                continue
+
+            data_path = data_files[0]
+            # Load WITHOUT actor filter - we pool both bots' data together
+            df = load_data_chunked(data_path, chunksize, actor_filter=None)
+
+            if df.is_empty():
+                continue
+
+            if also_load_distance:
+                dist_df = calculate_distance_between_bots(df)
+                if not dist_df.is_empty():
+                    timer = extract_timer_from_config(config_folder)
+                    if timer is not None:
+                        timer_distance_data.setdefault(timer, []).append(dist_df)
+
+            if group_by_timer:
+                timer = extract_timer_from_config(config_folder)
+                if timer is not None:
+                    timer_grouped_data.setdefault(timer, []).append(df)
+            else:
+                all_data.append(df)
+            total_files += 1
+
+    if group_by_timer:
+        if not timer_grouped_data:
+            print("No valid data found.")
+            return ({}, {}) if also_load_distance else {}
+
+        print(f"\nLoaded {total_files} files")
+        result = {}
+        for timer, dfs in timer_grouped_data.items():
+            result[timer] = pl.concat(dfs, how="vertical_relaxed")
+            print(f"  Timer {timer}: {len(result[timer]):,} samples")
+
+        return (result, timer_distance_data) if also_load_distance else result
+    else:
+        if not all_data:
+            print("No valid data found.")
+            return (pl.DataFrame(), {}) if also_load_distance else pl.DataFrame()
+
+        print(f"\nLoaded {total_files} files")
+        df_combined = pl.concat(all_data, how="vertical_relaxed")
+        print(f"Total samples: {len(df_combined):,}")
+
+        return (df_combined, timer_distance_data) if also_load_distance else df_combined
+
+
 def create_phased_heatmap_for_bot(base_dir, bot_name, actor_position="left", output_path=None, chunksize=50000, max_configs=None, use_timer=True):
     """
     Create heatmaps for a specific bot from simulation directory
@@ -811,25 +921,35 @@ def get_bot_heatmap_figures(base_dir, bot_name, actor_position="both", chunksize
 
 def calculate_distance_between_bots(df):
     """
-    Calculate distance between Bot 1 (Actor 0) and Bot 2 (Actor 1) for each game frame
+    Calculate distance between Bot 1 (Actor 0) and Bot 2 (Actor 1) for each game frame.
+
+    Joins on RoundIndex in addition to GameIndex/UpdatedAt when available. Best-of-N
+    rounds each restart their own UpdatedAt clock near 0, and the simulation ticks at a
+    fixed rate from each round's start, so two different rounds of the same game can share
+    identical UpdatedAt values — an inner join on (GameIndex, UpdatedAt) alone would then
+    cross-match bot1's position in one round with bot2's position in a different round.
 
     Args:
-        df: Polars DataFrame with columns including Actor, BotPosX, BotPosY, GameIndex, UpdatedAt
+        df: Polars DataFrame with columns including Actor, BotPosX, BotPosY, GameIndex,
+            RoundIndex, UpdatedAt
 
     Returns:
         Polars DataFrame with distance between bots for each frame
     """
+    join_cols = ["GameIndex", "RoundIndex", "UpdatedAt"] if "RoundIndex" in df.columns else ["GameIndex", "UpdatedAt"]
+    select_cols = join_cols + ["BotPosX", "BotPosY"]
+
     # Split data by actor - cast Actor inline for filtering
-    bot1_df = df.filter(pl.col("Actor").cast(pl.Int64) == 0).select([
-        "GameIndex", "UpdatedAt", "BotPosX", "BotPosY"
-    ]).rename({"BotPosX": "Bot1_X", "BotPosY": "Bot1_Y"})
+    bot1_df = df.filter(pl.col("Actor").cast(pl.Int64) == 0).select(select_cols).rename(
+        {"BotPosX": "Bot1_X", "BotPosY": "Bot1_Y"}
+    )
 
-    bot2_df = df.filter(pl.col("Actor").cast(pl.Int64) == 1).select([
-        "GameIndex", "UpdatedAt", "BotPosX", "BotPosY"
-    ]).rename({"BotPosX": "Bot2_X", "BotPosY": "Bot2_Y"})
+    bot2_df = df.filter(pl.col("Actor").cast(pl.Int64) == 1).select(select_cols).rename(
+        {"BotPosX": "Bot2_X", "BotPosY": "Bot2_Y"}
+    )
 
-    # Merge on GameIndex and UpdatedAt to align frames
-    merged = bot1_df.join(bot2_df, on=["GameIndex", "UpdatedAt"], how="inner")
+    # Merge on GameIndex (+ RoundIndex) and UpdatedAt to align frames
+    merged = bot1_df.join(bot2_df, on=join_cols, how="inner")
 
     # Calculate Euclidean distance
     merged = merged.with_columns([
@@ -1472,7 +1592,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
         if skip_initial > 0:
             print(f"  ⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
             df = df.filter(
-                pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over("GameIndex") + skip_initial
+                pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
             )
             if df.is_empty():
                 print(f"  No data remaining after skipping initial {skip_initial}s, skipping matchup...")
@@ -1650,7 +1770,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     for timer, df in timer_data.items():
                         # Filter out data where UpdatedAt < (min_UpdatedAt_for_that_game + skip_initial) per game
                         df_filtered = df.filter(
-                            pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over("GameIndex") + skip_initial
+                            pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
                         )
                         if not df_filtered.is_empty():
                             filtered_timer_data[timer] = df_filtered
@@ -1709,7 +1829,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     print(f"\n⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
                     original_count = len(df_combined)
                     df_combined = df_combined.filter(
-                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over("GameIndex") + skip_initial
+                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
                     )
                     print(f"  Filtered: {original_count:,} -> {len(df_combined):,} samples")
 
@@ -1765,7 +1885,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     print(f"\n⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
                     original_count = len(df_combined)
                     df_combined = df_combined.filter(
-                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over("GameIndex") + skip_initial
+                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
                     )
                     print(f"  Filtered: {original_count:,} -> {len(df_combined):,} samples")
 
@@ -1810,7 +1930,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     print(f"\n⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
                     original_count = len(df_combined)
                     df_combined = df_combined.filter(
-                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over("GameIndex") + skip_initial
+                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
                     )
                     print(f"  Filtered: {original_count:,} -> {len(df_combined):,} samples")
 
@@ -1828,6 +1948,159 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             else:
                 print(f"No data available for position distribution")
 
+    # ========== Generate aggregate "All Bots" heatmap + position distribution ==========
+    # Pools every bot's position samples together (bot identity dropped), so it needs its
+    # own data load via load_all_bots_data_from_simulation rather than reusing per-bot data.
+    if mode in ["heatmap", "position", "all"]:
+        print("\n" + "=" * 60)
+        print("Processing All Bots (pooled across every bot)")
+        print("=" * 60)
+
+        agg_label = "All Bots"
+        agg_dir = os.path.join(output_dir, "All_Bots_Combined")
+        os.makedirs(agg_dir, exist_ok=True)
+
+        agg_df_combined = None
+
+        if mode in ["heatmap", "all"]:
+            if use_timer:
+                print("\nLoading pooled data grouped by Timer...")
+                if include_distance_over_time:
+                    agg_timer_data, agg_distance_data = load_all_bots_data_from_simulation(
+                        base_dir, chunksize, max_configs, group_by_timer=True,
+                        also_load_distance=True, input_format=input_format, filter_matchups=filter_matchups
+                    )
+                else:
+                    agg_timer_data = load_all_bots_data_from_simulation(
+                        base_dir, chunksize, max_configs, group_by_timer=True,
+                        input_format=input_format, filter_matchups=filter_matchups
+                    )
+                    agg_distance_data = None
+
+                if not agg_timer_data:
+                    print("No pooled data found, skipping aggregate heatmap.")
+                else:
+                    if skip_initial > 0:
+                        print(f"\n⏩ Skipping initial {skip_initial}s of data per round to remove spawn bias...")
+                        filtered = {}
+                        for timer, df in agg_timer_data.items():
+                            df_filtered = df.filter(
+                                pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                            )
+                            if not df_filtered.is_empty():
+                                filtered[timer] = df_filtered
+                        agg_timer_data = filtered
+
+                    for timer in sorted(agg_timer_data.keys()):
+                        df = agg_timer_data[timer]
+                        label = f"Timer {int(timer)}s" if timer == int(timer) else f"Timer {timer}s"
+                        fig = plot_joint_heatmap_with_distributions(df, label, agg_label, actor_position)
+                        if fig is not None:
+                            timer_str = f"{int(timer)}" if timer == int(timer) else f"{timer}"
+                            output_path = os.path.join(agg_dir, f"timer_{timer_str}.png")
+                            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                            print(f"  Saved to {output_path}")
+                            plt.close(fig)
+
+                    if include_distance_over_time and agg_distance_data:
+                        print("\nGenerating pooled distance over time plot...")
+                        fig = plot_distance_over_time_from_data(agg_distance_data, agg_label, os.path.join(agg_dir, "distance_over_time.png"))
+                        if fig is not None:
+                            plt.close(fig)
+
+                        print("Generating pooled distance histogram...")
+                        fig = plot_distance_histogram_from_data(agg_distance_data, agg_label, os.path.join(agg_dir, "distance_histogram.png"))
+                        if fig is not None:
+                            plt.close(fig)
+
+                        print("Generating pooled distance from center histogram...")
+                        fig = plot_distance_from_center_histogram(agg_timer_data, agg_label, os.path.join(agg_dir, "distance_from_center_histogram.png"))
+                        if fig is not None:
+                            plt.close(fig)
+
+            elif use_time_windows:
+                print("\nLoading pooled data for time window grouping...")
+                agg_df_combined = load_all_bots_data_from_simulation(
+                    base_dir, chunksize, max_configs, group_by_timer=False,
+                    input_format=input_format, filter_matchups=filter_matchups
+                )
+
+                if agg_df_combined.is_empty():
+                    print("No pooled data found, skipping aggregate heatmap.")
+                else:
+                    if skip_initial > 0:
+                        agg_df_combined = agg_df_combined.filter(
+                            pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                        )
+
+                    time_windows = [
+                        (skip_initial, 15, f"{skip_initial}-15s") if skip_initial > 0 else (0, 15, "0-15s"),
+                        (15, 30, "15-30s"),
+                        (30, 45, "30-45s"),
+                        (45, 60, "45-60s")
+                    ]
+                    for start, end, window_name in time_windows:
+                        window_df = agg_df_combined.filter((pl.col("UpdatedAt") >= start) & (pl.col("UpdatedAt") < end))
+                        if window_df.is_empty():
+                            continue
+                        fig = plot_joint_heatmap_with_distributions(window_df, window_name, agg_label, actor_position)
+                        if fig is not None:
+                            output_path = os.path.join(agg_dir, f"window_{start}-{end}s.png")
+                            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                            print(f"  Saved to {output_path}")
+                            plt.close(fig)
+
+            else:
+                print("\nLoading pooled data...")
+                agg_df_combined = load_all_bots_data_from_simulation(
+                    base_dir, chunksize, max_configs, group_by_timer=False,
+                    input_format=input_format, filter_matchups=filter_matchups
+                )
+
+                if agg_df_combined.is_empty():
+                    print("No pooled data found, skipping aggregate heatmap.")
+                else:
+                    if skip_initial > 0:
+                        agg_df_combined = agg_df_combined.filter(
+                            pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                        )
+
+                    print("\nSplitting pooled data into phases...")
+                    phases = split_into_phases(agg_df_combined, num_phases=3)
+                    phase_names = ["Early Game", "Mid Game", "Late Game"]
+                    for idx, (phase_df, phase_name) in enumerate(zip(phases, phase_names)):
+                        if phase_df.is_empty():
+                            continue
+                        fig = plot_joint_heatmap_with_distributions(phase_df, phase_name, agg_label, actor_position)
+                        if fig is not None:
+                            output_path = os.path.join(agg_dir, f"{idx}.png")
+                            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                            print(f"  Saved to {output_path}")
+                            plt.close(fig)
+
+        if mode in ["position", "all"]:
+            if agg_df_combined is None or agg_df_combined.is_empty():
+                print("\nLoading pooled data for position distribution...")
+                agg_df_combined = load_all_bots_data_from_simulation(
+                    base_dir, chunksize, max_configs, group_by_timer=False,
+                    input_format=input_format, filter_matchups=filter_matchups
+                )
+                if not agg_df_combined.is_empty() and skip_initial > 0:
+                    agg_df_combined = agg_df_combined.filter(
+                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                    )
+
+            if not agg_df_combined.is_empty():
+                print("Creating pooled position distribution plot...")
+                fig_dist = plot_position_distribution(agg_df_combined, agg_label, actor_position)
+                if fig_dist is not None:
+                    dist_path = os.path.join(agg_dir, "position_distribution.png")
+                    fig_dist.savefig(dist_path, dpi=150, bbox_inches='tight')
+                    print(f"  Saved to {dist_path}")
+                    plt.close(fig_dist)
+            else:
+                print("No pooled data available for position distribution")
+
     # ========== Generate distance distributions per bot ==========
     print("\n" + "=" * 60)
     print("Generating distance distributions for each bot (across all matchups)...")
@@ -1835,6 +2108,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
     # Collect data per bot (across all matchups)
     bot_distance_data = {}  # {bot_name: [distance_between_series, distance_from_center_series]}
+    # Distance-between is symmetric and gets appended to BOTH bot1's and bot2's entries in
+    # bot_distance_data above, so pooling across bot_distance_data would double-count every
+    # matchup's series. Collect it once per matchup here instead, for the aggregate below.
+    all_between_distances = []
 
     # Process each matchup
     for matchup_folder in matchup_folders:
@@ -1861,7 +2138,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         if skip_initial > 0:
             print(f"  ⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
             df = df.filter(
-                pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over("GameIndex") + skip_initial
+                pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
             )
             if df.is_empty():
                 print(f"  No data remaining after skipping initial {skip_initial}s, skipping matchup...")
@@ -1871,6 +2148,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         # Calculate distance between bots
         print("  Calculating distance between bots...")
         dist_between = calculate_distance_between_bots(df)
+        all_between_distances.append(dist_between["Distance"])
 
         # Calculate distance from center for each bot
         print("  Calculating distance from center...")
@@ -1942,6 +2220,54 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         bot_output_dir = os.path.join(output_dir, bot_name)
         os.makedirs(bot_output_dir, exist_ok=True)
         output_path = os.path.join(bot_output_dir, "distance_distribution.png")
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved to {output_path}")
+        plt.close(fig)
+
+    # Create pooled distance distribution across all bots
+    if all_between_distances and bot_distance_data:
+        print("\n" + "=" * 60)
+        print("Creating pooled distance distribution for All Bots...")
+        print("=" * 60)
+
+        combined_between = pl.concat(all_between_distances)
+        combined_from_center = pl.concat([
+            series for data in bot_distance_data.values() for series in data["from_center"]
+        ])
+
+        between_numpy = combined_between.to_numpy()
+        from_center_numpy = combined_from_center.to_numpy()
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+        ax1.hist(between_numpy, bins=30, color='steelblue', edgecolor='black', alpha=0.7)
+        ax1.set_title("Distance Between Bots (All Bots, All Matchups)", fontsize=14, fontweight='bold')
+        ax1.set_xlabel("Distance Between Bots", fontsize=12)
+        ax1.set_ylabel("Frequency", fontsize=12)
+        ax1.grid(True, alpha=0.3, linestyle='--')
+        ax1.text(0.98, 0.98, f"n={len(between_numpy):,}",
+                transform=ax1.transAxes, ha='right', va='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        ax2.hist(from_center_numpy, bins=30, color='green', edgecolor='black', alpha=0.7)
+        ax2.set_title("Distance from Center: All Bots", fontsize=14, fontweight='bold')
+        ax2.set_xlabel("Distance from Center", fontsize=12)
+        ax2.set_ylabel("Frequency", fontsize=12)
+        ax2.grid(True, alpha=0.3, linestyle='--')
+
+        ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2,
+                   label=f'Arena Radius ({arena_radius:.2f})', alpha=0.8)
+        ax2.legend(loc='upper right', fontsize=10)
+
+        ax2.text(0.98, 0.98, f"n={len(from_center_numpy):,}",
+                transform=ax2.transAxes, ha='right', va='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        plt.tight_layout()
+
+        agg_output_dir = os.path.join(output_dir, "All_Bots_Combined")
+        os.makedirs(agg_output_dir, exist_ok=True)
+        output_path = os.path.join(agg_output_dir, "distance_distribution.png")
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"  Saved to {output_path}")
         plt.close(fig)
