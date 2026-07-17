@@ -1681,10 +1681,11 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     print(f"✅ Completed! Distance distribution plots saved in bot folders")
     print("=" * 60)
 
-def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None):
+def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all"):
     """
     Create heatmaps and position distribution plots for all bots in the simulation directory
-    Saves individual phase/timer images for each bot
+    Saves individual phase/timer images for each bot, plus a pooled "All_Bots_Combined"
+    aggregate (heatmap, position distribution, distance distributions) across every bot.
 
     Args:
         base_dir: Base simulation directory
@@ -1700,7 +1701,14 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         input_format: "csv", "parquet", or "auto" (default: "auto" prefers parquet)
         filter_bots: Optional list of bot names to process (e.g., ["Bot_BT", "Bot_GA"]). If None, process all bots.
         filter_matchups: Optional list of matchup names to process (e.g., ["Bot_BT_vs_Bot_GA"]). If None, process all matchups.
+        bot_scope: "all" (default) generates both per-bot charts and the pooled
+            All_Bots_Combined aggregate; "aggregate_only" skips the per-bot loop entirely
+            and only generates the pooled aggregate (faster if you only want the overall
+            view); "per_bot_only" skips the aggregate and only generates per-bot charts.
     """
+    if bot_scope not in ("all", "aggregate_only", "per_bot_only"):
+        raise ValueError(f"bot_scope must be 'all', 'aggregate_only', or 'per_bot_only', got {bot_scope!r}")
+
     # Find all unique bot names from matchup folders
     matchup_folders = [f for f in os.listdir(base_dir)
                       if os.path.isdir(os.path.join(base_dir, f)) and "_vs_" in f]
@@ -1709,6 +1717,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
     if filter_matchups:
         matchup_folders = [m for m in matchup_folders if m in filter_matchups]
         print(f"Filtering to {len(matchup_folders)} matchups: {filter_matchups}")
+
+    if not matchup_folders:
+        print("No matchup folders found!")
+        return
 
     bot_names = set()
     for matchup in matchup_folders:
@@ -1726,7 +1738,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
     else:
         print(f"Found {len(bot_names)} unique bots: {bot_names}")
 
-    if not bot_names:
+    if bot_scope != "aggregate_only" and not bot_names:
         print("No bots to process after filtering!")
         return
 
@@ -1734,7 +1746,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
     os.makedirs(output_dir, exist_ok=True)
 
     # Process each bot
-    for bot_name in bot_names:
+    for bot_name in ([] if bot_scope == "aggregate_only" else bot_names):
         print("\n" + "=" * 60)
         print(f"Processing {bot_name}")
         print("=" * 60)
@@ -1951,7 +1963,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
     # ========== Generate aggregate "All Bots" heatmap + position distribution ==========
     # Pools every bot's position samples together (bot identity dropped), so it needs its
     # own data load via load_all_bots_data_from_simulation rather than reusing per-bot data.
-    if mode in ["heatmap", "position", "all"]:
+    if bot_scope != "per_bot_only" and mode in ["heatmap", "position", "all"]:
         print("\n" + "=" * 60)
         print("Processing All Bots (pooled across every bot)")
         print("=" * 60)
@@ -2173,7 +2185,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         bot_distance_data[bot2_name]["from_center"].append(bot2_center_dist)
 
     # Create distance distribution plot for each bot
-    for bot_name, data in bot_distance_data.items():
+    for bot_name, data in ({} if bot_scope == "aggregate_only" else bot_distance_data).items():
         print("\n" + "=" * 60)
         print(f"Creating distance distribution for {bot_name}...")
         print("=" * 60)
@@ -2225,7 +2237,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         plt.close(fig)
 
     # Create pooled distance distribution across all bots
-    if all_between_distances and bot_distance_data:
+    if bot_scope != "per_bot_only" and all_between_distances and bot_distance_data:
         print("\n" + "=" * 60)
         print("Creating pooled distance distribution for All Bots...")
         print("=" * 60)
