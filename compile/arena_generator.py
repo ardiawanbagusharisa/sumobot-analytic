@@ -233,8 +233,8 @@ def plot_phase_heatmap(ax, phase_df, phase_name):
 
     # Labels & Arena Bounds
     ax.set_title(f"{phase_name}\n(n={len(phase_df):,} samples)")
-    ax.set_xlabel("BotPosX (shifted)")
-    ax.set_ylabel("BotPosY (shifted)")
+    ax.set_xlabel("BotPosX")
+    ax.set_ylabel("BotPosY")
     ax.set_aspect("equal", adjustable="box")
 
     ax.set_xlim(0 - arena_radius - 1, 0 + arena_radius + 1)
@@ -244,7 +244,13 @@ def plot_phase_heatmap(ax, phase_df, phase_name):
     ax.grid(True, alpha=0.3, zorder=0)
 
 
-def plot_position_distribution(df_combined, bot_name, actor_position="both"):
+def _write_cache_csv(df, cache_path):
+    """Write a small Polars DataFrame of chart-ready data to cache_path, creating parent dirs."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    df.write_csv(cache_path)
+
+
+def plot_position_distribution(df_combined, bot_name, actor_position="both", cache_path=None):
     """
     Plot X and Y position distributions in a single frame (overlaid histograms)
     Y values are shifted by -2 since the game starts at y=2
@@ -253,6 +259,11 @@ def plot_position_distribution(df_combined, bot_name, actor_position="both"):
         df_combined: Combined Polars DataFrame with bot position data
         bot_name: Name of the bot
         actor_position: Position filter text for title
+        cache_path: If set, write the raw BotPosX/BotPosY samples used for this chart to
+            this CSV path, so the chart can be redrawn later via
+            plot_position_distribution_from_cache() without reloading/refiltering the
+            underlying simulation data (useful for iterating on titles/labels/colors when
+            the source data is very large).
 
     Returns:
         matplotlib figure
@@ -260,9 +271,32 @@ def plot_position_distribution(df_combined, bot_name, actor_position="both"):
     if df_combined.is_empty():
         return None
 
-    x = df_combined["BotPosX"].to_numpy() - arena_center[0]
-    y = df_combined["BotPosY"].to_numpy() - arena_center[1]  # Shift by arena center
+    bot_x = df_combined["BotPosX"].to_numpy()
+    bot_y = df_combined["BotPosY"].to_numpy()
 
+    if cache_path:
+        _write_cache_csv(pl.DataFrame({"BotPosX": bot_x, "BotPosY": bot_y}), cache_path)
+
+    return _render_position_distribution(bot_x - arena_center[0], bot_y - arena_center[1], bot_name, actor_position, len(df_combined))
+
+
+def plot_position_distribution_from_cache(cache_path, bot_name, actor_position="both"):
+    """
+    Redraw the position distribution chart from a CSV previously written by
+    plot_position_distribution(..., cache_path=...), skipping the expensive data load.
+    """
+    df = pl.read_csv(cache_path)
+    if df.is_empty():
+        return None
+
+    x = df["BotPosX"].to_numpy() - arena_center[0]
+    y = df["BotPosY"].to_numpy() - arena_center[1]
+    return _render_position_distribution(x, y, bot_name, actor_position, len(df))
+
+
+def _render_position_distribution(x, y, bot_name, actor_position, n_samples):
+    """Pure rendering step for plot_position_distribution - only touches small arrays,
+    so this is the part to edit when iterating on chart design (title/labels/colors)."""
     # Create figure with single subplot
     fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
@@ -276,9 +310,9 @@ def plot_position_distribution(df_combined, bot_name, actor_position="both"):
 
     # Customize plot
     position_text = f" ({actor_position} side)" if actor_position != "both" else ""
-    ax.set_title(f"Distribution of {bot_name} Positions (Overlayed){position_text}\n(n={len(df_combined):,} samples)",
+    ax.set_title(f"Distribution of {bot_name} Positions{position_text}\n(n={n_samples:,} samples)",
                 fontsize=14, fontweight='bold')
-    ax.set_xlabel("Position (shifted by arena center)", fontsize=12)
+    ax.set_xlabel("Position", fontsize=12)
     ax.set_ylabel("Frequency", fontsize=12)
     ax.legend(loc='upper right', fontsize=10)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -287,7 +321,7 @@ def plot_position_distribution(df_combined, bot_name, actor_position="both"):
     return fig
 
 
-def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", actor_position="both"):
+def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", actor_position="both", cache_path=None):
     """
     Create a joint plot with contour heatmap and marginal distributions (like seaborn jointplot)
     Y values are shifted by -2 since the game starts at y=2
@@ -297,6 +331,11 @@ def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", act
         phase_name: Name of the phase (e.g., "Early Game")
         bot_name: Name of the bot
         actor_position: Position filter text for title
+        cache_path: If set, write the raw BotPosX/BotPosY samples used for this chart to
+            this CSV path, so the chart can be redrawn later via
+            plot_joint_heatmap_from_cache() without reloading/refiltering/re-KDE'ing the
+            underlying simulation data (useful for iterating on titles/labels/colors when
+            the source data is very large - this is the most expensive plot to regenerate).
 
     Returns:
         matplotlib figure
@@ -304,9 +343,35 @@ def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", act
     if phase_df.is_empty():
         return None
 
-    x = phase_df["BotPosX"].to_numpy() - arena_center[0]
-    y = phase_df["BotPosY"].to_numpy() - arena_center[1]  # Shift by arena center
+    bot_x = phase_df["BotPosX"].to_numpy()
+    bot_y = phase_df["BotPosY"].to_numpy()
 
+    if cache_path:
+        _write_cache_csv(pl.DataFrame({"BotPosX": bot_x, "BotPosY": bot_y}), cache_path)
+
+    return _render_joint_heatmap(bot_x - arena_center[0], bot_y - arena_center[1], phase_name, bot_name, actor_position, len(phase_df))
+
+
+def plot_joint_heatmap_from_cache(cache_path, phase_name, bot_name="", actor_position="both"):
+    """
+    Redraw the joint heatmap (contour + marginal distributions) from a CSV previously
+    written by plot_joint_heatmap_with_distributions(..., cache_path=...), skipping the
+    expensive data load/filter step. The KDE itself is still recomputed here (cheap on the
+    small cached array), so bin/bandwidth-independent design changes (title, labels,
+    colors, colormap) can be iterated on quickly.
+    """
+    df = pl.read_csv(cache_path)
+    if df.is_empty():
+        return None
+
+    x = df["BotPosX"].to_numpy() - arena_center[0]
+    y = df["BotPosY"].to_numpy() - arena_center[1]
+    return _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, len(df))
+
+
+def _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, n_samples):
+    """Pure rendering step for plot_joint_heatmap_with_distributions - only touches the
+    small x/y arrays, so this is the part to edit when iterating on chart design."""
     # Create figure with GridSpec for joint plot layout
     from matplotlib.gridspec import GridSpec
 
@@ -416,7 +481,7 @@ def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", act
 
     # Add title
     position_text = f" ({actor_position} side)" if actor_position != "both" else ""
-    title = f"Contour Heatmap with Marginal Distributions\n{bot_name}{position_text} - {phase_name}\n(n={len(phase_df):,} samples)"
+    title = f"{bot_name}{position_text} - {phase_name}\n(n={n_samples:,} samples)"
     fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
 
     return fig
@@ -977,7 +1042,7 @@ def calculate_distance_from_center(df):
 
     return df
 
-def plot_distance_histogram_from_data(distance_data, bot_name, output_path=None):
+def plot_distance_histogram_from_data(distance_data, bot_name, output_path=None, cache_path=None):
     """
     Plot histogram of distance between bot and all opponents
 
@@ -985,6 +1050,9 @@ def plot_distance_histogram_from_data(distance_data, bot_name, output_path=None)
         distance_data: Dict of {timer: [list of distance dataframes]}
         bot_name: Name of the bot to analyze
         output_path: Path to save the figure
+        cache_path: If set, write the flattened (timer, Distance) samples used for this
+            chart to this CSV path, so it can be redrawn later via
+            plot_distance_histogram_from_cache() without reloading the underlying data.
 
     Returns:
         matplotlib figure
@@ -995,13 +1063,38 @@ def plot_distance_histogram_from_data(distance_data, bot_name, output_path=None)
 
     # Combine all distance data across all timers and opponents
     all_distances = []
+    cache_parts = [] if cache_path else None
     for timer, dfs in distance_data.items():
         combined_df = pl.concat(dfs, how="vertical_relaxed")
-        all_distances.append(combined_df["Distance"].to_numpy())
+        dist_arr = combined_df["Distance"].to_numpy()
+        all_distances.append(dist_arr)
+        if cache_path:
+            cache_parts.append(pl.DataFrame({"timer": [timer] * len(dist_arr), "Distance": dist_arr}))
 
     # Concatenate all distances
     distances = np.concatenate(all_distances)
 
+    if cache_path:
+        _write_cache_csv(pl.concat(cache_parts), cache_path)
+
+    return _render_distance_histogram(distances, bot_name, output_path)
+
+
+def plot_distance_histogram_from_cache(cache_path, bot_name, output_path=None):
+    """
+    Redraw the distance-between-bots histogram from a CSV previously written by
+    plot_distance_histogram_from_data(..., cache_path=...), skipping the expensive data load.
+    """
+    df = pl.read_csv(cache_path)
+    if df.is_empty():
+        print("No valid distance data found")
+        return None
+    return _render_distance_histogram(df["Distance"].to_numpy(), bot_name, output_path)
+
+
+def _render_distance_histogram(distances, bot_name, output_path=None):
+    """Pure rendering step for plot_distance_histogram_from_data - only touches the small
+    distances array, so this is the part to edit when iterating on chart design."""
     # Create figure
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -1035,7 +1128,7 @@ def plot_distance_histogram_from_data(distance_data, bot_name, output_path=None)
     return fig
 
 
-def plot_distance_from_center_histogram(bot_data, bot_name, output_path=None):
+def plot_distance_from_center_histogram(bot_data, bot_name, output_path=None, cache_path=None):
     """
     Plot histogram of distance from center for a specific bot
 
@@ -1043,6 +1136,10 @@ def plot_distance_from_center_histogram(bot_data, bot_name, output_path=None):
         bot_data: DataFrame or dict of DataFrames with bot position data
         bot_name: Name of the bot to analyze
         output_path: Path to save the figure
+        cache_path: If set, write the DistanceFromCenter samples used for this chart to
+            this CSV path, so it can be redrawn later via
+            plot_distance_from_center_histogram_from_cache() without reloading the
+            underlying data.
 
     Returns:
         matplotlib figure
@@ -1065,6 +1162,27 @@ def plot_distance_from_center_histogram(bot_data, bot_name, output_path=None):
     df_with_center_dist = calculate_distance_from_center(combined_df)
     distances = df_with_center_dist["DistanceFromCenter"].to_numpy()
 
+    if cache_path:
+        _write_cache_csv(pl.DataFrame({"DistanceFromCenter": distances}), cache_path)
+
+    return _render_distance_from_center_histogram(distances, bot_name, output_path)
+
+
+def plot_distance_from_center_histogram_from_cache(cache_path, bot_name, output_path=None):
+    """
+    Redraw the distance-from-center histogram from a CSV previously written by
+    plot_distance_from_center_histogram(..., cache_path=...), skipping the expensive data load.
+    """
+    df = pl.read_csv(cache_path)
+    if df.is_empty():
+        print("No valid data found")
+        return None
+    return _render_distance_from_center_histogram(df["DistanceFromCenter"].to_numpy(), bot_name, output_path)
+
+
+def _render_distance_from_center_histogram(distances, bot_name, output_path=None):
+    """Pure rendering step for plot_distance_from_center_histogram - only touches the
+    small distances array, so this is the part to edit when iterating on chart design."""
     # Create figure
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -1102,7 +1220,7 @@ def plot_distance_from_center_histogram(bot_data, bot_name, output_path=None):
     return fig
 
 
-def plot_distance_over_time_from_data(timer_data, bot_name, output_path=None):
+def plot_distance_over_time_from_data(timer_data, bot_name, output_path=None, cache_path=None):
     """
     Plot mean distance over time from pre-loaded timer-grouped data
 
@@ -1110,6 +1228,9 @@ def plot_distance_over_time_from_data(timer_data, bot_name, output_path=None):
         timer_data: Dict of {timer: [list of distance dataframes]}
         bot_name: Name of the bot to analyze
         output_path: Path to save the figure
+        cache_path: If set, write the flattened (timer, UpdatedAt, Distance) samples used
+            for this chart to this CSV path, so it can be redrawn later via
+            plot_distance_over_time_from_cache() without reloading the underlying data.
 
     Returns:
         matplotlib figure
@@ -1118,6 +1239,32 @@ def plot_distance_over_time_from_data(timer_data, bot_name, output_path=None):
         print("No valid data found")
         return None
 
+    if cache_path:
+        cache_parts = []
+        for timer, dfs in timer_data.items():
+            combined_df = pl.concat(dfs, how="vertical_relaxed").select(["UpdatedAt", "Distance"])
+            cache_parts.append(combined_df.with_columns(pl.lit(timer).alias("timer")))
+        _write_cache_csv(pl.concat(cache_parts), cache_path)
+
+    return _render_distance_over_time(timer_data, bot_name, output_path)
+
+
+def plot_distance_over_time_from_cache(cache_path, bot_name, output_path=None):
+    """
+    Redraw the distance-over-time chart from a CSV previously written by
+    plot_distance_over_time_from_data(..., cache_path=...), skipping the expensive data load.
+    """
+    df = pl.read_csv(cache_path)
+    if df.is_empty():
+        print("No valid data found")
+        return None
+    timer_data = {timer_key[0]: [group.drop("timer")] for timer_key, group in df.group_by("timer")}
+    return _render_distance_over_time(timer_data, bot_name, output_path)
+
+
+def _render_distance_over_time(timer_data, bot_name, output_path=None):
+    """Pure rendering step for plot_distance_over_time_from_data - only touches the small
+    per-timer arrays, so this is the part to edit when iterating on chart design."""
     # Create the plot
     fig, ax = plt.subplots(figsize=(14, 8))
 
@@ -1192,6 +1339,92 @@ def plot_distance_over_time_from_data(timer_data, bot_name, output_path=None):
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"  Saved distance over time to {output_path}")
+
+    return fig
+
+
+def plot_distance_distribution(between_series, from_center_series, name, output_path=None, cache_path=None, is_pooled=False):
+    """
+    Plot the 2-subplot "distance_distribution" chart: distance between bots (top) and
+    distance from center (bottom), for one bot (averaged across all its matchups) or
+    pooled across every bot.
+
+    Args:
+        between_series: Series/array of distance-between-bots samples
+        from_center_series: Series/array of distance-from-center samples
+        name: Bot name, or "All Bots" for the pooled aggregate
+        output_path: Path to save the figure
+        cache_path: If set, write the (kind, value) samples used for this chart to this CSV
+            path, so it can be redrawn later via plot_distance_distribution_from_cache()
+            without reloading/rejoining the underlying data.
+        is_pooled: True for the pooled "All Bots" aggregate, which uses slightly different
+            title wording than the per-bot chart.
+
+    Returns:
+        matplotlib figure
+    """
+    between_numpy = between_series.to_numpy() if hasattr(between_series, "to_numpy") else np.asarray(between_series)
+    from_center_numpy = from_center_series.to_numpy() if hasattr(from_center_series, "to_numpy") else np.asarray(from_center_series)
+
+    if cache_path:
+        cache_df = pl.concat([
+            pl.DataFrame({"kind": ["between"] * len(between_numpy), "value": between_numpy}),
+            pl.DataFrame({"kind": ["from_center"] * len(from_center_numpy), "value": from_center_numpy}),
+        ])
+        _write_cache_csv(cache_df, cache_path)
+
+    return _render_distance_distribution(between_numpy, from_center_numpy, name, output_path, is_pooled)
+
+
+def plot_distance_distribution_from_cache(cache_path, name, output_path=None, is_pooled=False):
+    """
+    Redraw the distance_distribution chart from a CSV previously written by
+    plot_distance_distribution(..., cache_path=...), skipping the expensive data load.
+    """
+    df = pl.read_csv(cache_path)
+    between_numpy = df.filter(pl.col("kind") == "between")["value"].to_numpy()
+    from_center_numpy = df.filter(pl.col("kind") == "from_center")["value"].to_numpy()
+    return _render_distance_distribution(between_numpy, from_center_numpy, name, output_path, is_pooled)
+
+
+def _render_distance_distribution(between_numpy, from_center_numpy, name, output_path=None, is_pooled=False):
+    """Pure rendering step for plot_distance_distribution - only touches the small
+    between/from_center arrays, so this is the part to edit when iterating on chart design."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+    # Plot 1: Distance between bots (averaged across all matchups)
+    ax1.hist(between_numpy, bins=30, color='steelblue', edgecolor='black', alpha=0.7)
+    between_title = "Distance Between Bots (All Bots, All Matchups)" if is_pooled else f"Distance Between {name} and Opponents (All Matchups)"
+    ax1.set_title(between_title, fontsize=14, fontweight='bold')
+    ax1.set_xlabel("Distance Between Bots", fontsize=12)
+    ax1.set_ylabel("Frequency", fontsize=12)
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.text(0.98, 0.98, f"n={len(between_numpy):,}",
+            transform=ax1.transAxes, ha='right', va='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Plot 2: Distance from center
+    ax2.hist(from_center_numpy, bins=30, color='green', edgecolor='black', alpha=0.7)
+    from_center_title = "Distance from Center: All Bots" if is_pooled else f"Distance from Center: {name}"
+    ax2.set_title(from_center_title, fontsize=14, fontweight='bold')
+    ax2.set_xlabel("Distance from Center", fontsize=12)
+    ax2.set_ylabel("Frequency", fontsize=12)
+    ax2.grid(True, alpha=0.3, linestyle='--')
+
+    # Add arena radius reference line
+    ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2,
+               label=f'Arena Radius ({arena_radius:.2f})', alpha=0.8)
+    ax2.legend(loc='upper right', fontsize=10)
+
+    ax2.text(0.98, 0.98, f"n={len(from_center_numpy):,}",
+            transform=ax2.transAxes, ha='right', va='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved to {output_path}")
 
     return fig
 
@@ -1681,7 +1914,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     print(f"✅ Completed! Distance distribution plots saved in bot folders")
     print("=" * 60)
 
-def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all"):
+def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all", cache_dir=None):
     """
     Create heatmaps and position distribution plots for all bots in the simulation directory
     Saves individual phase/timer images for each bot, plus a pooled "All_Bots_Combined"
@@ -1705,6 +1938,11 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             All_Bots_Combined aggregate; "aggregate_only" skips the per-bot loop entirely
             and only generates the pooled aggregate (faster if you only want the overall
             view); "per_bot_only" skips the aggregate and only generates per-bot charts.
+        cache_dir: Optional directory to mirror output_dir's structure with a small CSV of
+            the raw sample arrays behind each chart (BotPosX/BotPosY, Distance, etc). When
+            set, every chart also writes its cache CSV alongside the PNG. Once populated,
+            pass this directory to render_charts_from_cache() to redraw all charts (e.g.
+            after tweaking titles/labels/colors) without rescanning the simulation data.
     """
     if bot_scope not in ("all", "aggregate_only", "per_bot_only"):
         raise ValueError(f"bot_scope must be 'all', 'aggregate_only', or 'per_bot_only', got {bot_scope!r}")
@@ -1754,6 +1992,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         # Create bot-specific directory
         bot_dir = os.path.join(output_dir, bot_name)
         os.makedirs(bot_dir, exist_ok=True)
+        cache_bot_dir = os.path.join(cache_dir, bot_name) if cache_dir else None
 
         # Generate heatmaps if requested
         if mode in ["heatmap", "all"]:
@@ -1797,11 +2036,12 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     print(f"  Time range: {df['UpdatedAt'].min():.2f} - {df['UpdatedAt'].max():.2f}")
 
                     label = f"Timer {int(timer)}s" if timer == int(timer) else f"Timer {timer}s"
-                    fig = plot_joint_heatmap_with_distributions(df, label, bot_name, actor_position)
+                    timer_str = f"{int(timer)}" if timer == int(timer) else f"{timer}"
+                    cache_path = os.path.join(cache_bot_dir, f"timer_{timer_str}.csv") if cache_bot_dir else None
+                    fig = plot_joint_heatmap_with_distributions(df, label, bot_name, actor_position, cache_path=cache_path)
 
                     if fig is not None:
                         # Save with timer in filename
-                        timer_str = f"{int(timer)}" if timer == int(timer) else f"{timer}"
                         output_path = os.path.join(bot_dir, f"timer_{timer_str}.png")
                         plt.savefig(output_path, dpi=150, bbox_inches='tight')
                         print(f"  Saved to {output_path}")
@@ -1811,19 +2051,22 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                 if include_distance_over_time and distance_data:
                     print(f"\nGenerating distance over time plot...")
                     output_path = os.path.join(bot_dir, "distance_over_time.png")
-                    fig = plot_distance_over_time_from_data(distance_data, bot_name, output_path)
+                    cache_path = os.path.join(cache_bot_dir, "distance_over_time.csv") if cache_bot_dir else None
+                    fig = plot_distance_over_time_from_data(distance_data, bot_name, output_path, cache_path=cache_path)
                     if fig is not None:
                         plt.close(fig)
 
                     print(f"Generating distance histogram...")
                     output_path = os.path.join(bot_dir, "distance_histogram.png")
-                    fig = plot_distance_histogram_from_data(distance_data, bot_name, output_path)
+                    cache_path = os.path.join(cache_bot_dir, "distance_histogram.csv") if cache_bot_dir else None
+                    fig = plot_distance_histogram_from_data(distance_data, bot_name, output_path, cache_path=cache_path)
                     if fig is not None:
                         plt.close(fig)
 
                     print(f"Generating distance from center histogram...")
                     output_path = os.path.join(bot_dir, "distance_from_center_histogram.png")
-                    fig = plot_distance_from_center_histogram(timer_data, bot_name, output_path)
+                    cache_path = os.path.join(cache_bot_dir, "distance_from_center_histogram.csv") if cache_bot_dir else None
+                    fig = plot_distance_from_center_histogram(timer_data, bot_name, output_path, cache_path=cache_path)
                     if fig is not None:
                         plt.close(fig)
 
@@ -1874,7 +2117,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     print(f"  Time range: {window_df['UpdatedAt'].min():.2f} - {window_df['UpdatedAt'].max():.2f}")
 
                     # Create joint plot
-                    fig = plot_joint_heatmap_with_distributions(window_df, window_name, bot_name, actor_position)
+                    cache_path = os.path.join(cache_bot_dir, f"window_{start}-{end}s.csv") if cache_bot_dir else None
+                    fig = plot_joint_heatmap_with_distributions(window_df, window_name, bot_name, actor_position, cache_path=cache_path)
 
                     if fig is not None:
                         # Save with window name in filename
@@ -1921,7 +2165,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         continue
 
                     # Create joint plot with marginal distributions
-                    fig = plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name, actor_position)
+                    cache_path = os.path.join(cache_bot_dir, f"{idx}.csv") if cache_bot_dir else None
+                    fig = plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name, actor_position, cache_path=cache_path)
 
                     if fig is not None:
                         # Save
@@ -1950,7 +2195,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             if 'df_combined' in locals() and not df_combined.is_empty():
                 # Create position distribution plot
                 print(f"Creating position distribution plot...")
-                fig_dist = plot_position_distribution(df_combined, bot_name, actor_position)
+                cache_path = os.path.join(cache_bot_dir, "position_distribution.csv") if cache_bot_dir else None
+                fig_dist = plot_position_distribution(df_combined, bot_name, actor_position, cache_path=cache_path)
 
                 if fig_dist is not None:
                     dist_path = os.path.join(bot_dir, "position_distribution.png")
@@ -1971,6 +2217,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         agg_label = "All Bots"
         agg_dir = os.path.join(output_dir, "All_Bots_Combined")
         os.makedirs(agg_dir, exist_ok=True)
+        agg_cache_dir = os.path.join(cache_dir, "All_Bots_Combined") if cache_dir else None
 
         agg_df_combined = None
 
@@ -2006,9 +2253,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     for timer in sorted(agg_timer_data.keys()):
                         df = agg_timer_data[timer]
                         label = f"Timer {int(timer)}s" if timer == int(timer) else f"Timer {timer}s"
-                        fig = plot_joint_heatmap_with_distributions(df, label, agg_label, actor_position)
+                        timer_str = f"{int(timer)}" if timer == int(timer) else f"{timer}"
+                        cache_path = os.path.join(agg_cache_dir, f"timer_{timer_str}.csv") if agg_cache_dir else None
+                        fig = plot_joint_heatmap_with_distributions(df, label, agg_label, actor_position, cache_path=cache_path)
                         if fig is not None:
-                            timer_str = f"{int(timer)}" if timer == int(timer) else f"{timer}"
                             output_path = os.path.join(agg_dir, f"timer_{timer_str}.png")
                             plt.savefig(output_path, dpi=150, bbox_inches='tight')
                             print(f"  Saved to {output_path}")
@@ -2016,17 +2264,20 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
                     if include_distance_over_time and agg_distance_data:
                         print("\nGenerating pooled distance over time plot...")
-                        fig = plot_distance_over_time_from_data(agg_distance_data, agg_label, os.path.join(agg_dir, "distance_over_time.png"))
+                        cache_path = os.path.join(agg_cache_dir, "distance_over_time.csv") if agg_cache_dir else None
+                        fig = plot_distance_over_time_from_data(agg_distance_data, agg_label, os.path.join(agg_dir, "distance_over_time.png"), cache_path=cache_path)
                         if fig is not None:
                             plt.close(fig)
 
                         print("Generating pooled distance histogram...")
-                        fig = plot_distance_histogram_from_data(agg_distance_data, agg_label, os.path.join(agg_dir, "distance_histogram.png"))
+                        cache_path = os.path.join(agg_cache_dir, "distance_histogram.csv") if agg_cache_dir else None
+                        fig = plot_distance_histogram_from_data(agg_distance_data, agg_label, os.path.join(agg_dir, "distance_histogram.png"), cache_path=cache_path)
                         if fig is not None:
                             plt.close(fig)
 
                         print("Generating pooled distance from center histogram...")
-                        fig = plot_distance_from_center_histogram(agg_timer_data, agg_label, os.path.join(agg_dir, "distance_from_center_histogram.png"))
+                        cache_path = os.path.join(agg_cache_dir, "distance_from_center_histogram.csv") if agg_cache_dir else None
+                        fig = plot_distance_from_center_histogram(agg_timer_data, agg_label, os.path.join(agg_dir, "distance_from_center_histogram.png"), cache_path=cache_path)
                         if fig is not None:
                             plt.close(fig)
 
@@ -2055,7 +2306,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         window_df = agg_df_combined.filter((pl.col("UpdatedAt") >= start) & (pl.col("UpdatedAt") < end))
                         if window_df.is_empty():
                             continue
-                        fig = plot_joint_heatmap_with_distributions(window_df, window_name, agg_label, actor_position)
+                        cache_path = os.path.join(agg_cache_dir, f"window_{start}-{end}s.csv") if agg_cache_dir else None
+                        fig = plot_joint_heatmap_with_distributions(window_df, window_name, agg_label, actor_position, cache_path=cache_path)
                         if fig is not None:
                             output_path = os.path.join(agg_dir, f"window_{start}-{end}s.png")
                             plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -2083,7 +2335,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     for idx, (phase_df, phase_name) in enumerate(zip(phases, phase_names)):
                         if phase_df.is_empty():
                             continue
-                        fig = plot_joint_heatmap_with_distributions(phase_df, phase_name, agg_label, actor_position)
+                        cache_path = os.path.join(agg_cache_dir, f"{idx}.csv") if agg_cache_dir else None
+                        fig = plot_joint_heatmap_with_distributions(phase_df, phase_name, agg_label, actor_position, cache_path=cache_path)
                         if fig is not None:
                             output_path = os.path.join(agg_dir, f"{idx}.png")
                             plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -2104,7 +2357,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
             if not agg_df_combined.is_empty():
                 print("Creating pooled position distribution plot...")
-                fig_dist = plot_position_distribution(agg_df_combined, agg_label, actor_position)
+                cache_path = os.path.join(agg_cache_dir, "position_distribution.csv") if agg_cache_dir else None
+                fig_dist = plot_position_distribution(agg_df_combined, agg_label, actor_position, cache_path=cache_path)
                 if fig_dist is not None:
                     dist_path = os.path.join(agg_dir, "position_distribution.png")
                     fig_dist.savefig(dist_path, dpi=150, bbox_inches='tight')
@@ -2194,47 +2448,16 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         combined_between = pl.concat(data["between"])
         combined_from_center = pl.concat(data["from_center"])
 
-        between_numpy = combined_between.to_numpy()
-        from_center_numpy = combined_from_center.to_numpy()
-
-        # Create 2-subplot figure
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
-
-        # Plot 1: Distance between bots (averaged across all matchups)
-        ax1.hist(between_numpy, bins=30, color='steelblue', edgecolor='black', alpha=0.7)
-        ax1.set_title(f"Distance Between {bot_name} and Opponents (All Matchups)", fontsize=14, fontweight='bold')
-        ax1.set_xlabel("Distance Between Bots", fontsize=12)
-        ax1.set_ylabel("Frequency", fontsize=12)
-        ax1.grid(True, alpha=0.3, linestyle='--')
-        ax1.text(0.98, 0.98, f"n={len(between_numpy):,}",
-                transform=ax1.transAxes, ha='right', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-        # Plot 2: Distance from center
-        ax2.hist(from_center_numpy, bins=30, color='green', edgecolor='black', alpha=0.7)
-        ax2.set_title(f"Distance from Center: {bot_name}", fontsize=14, fontweight='bold')
-        ax2.set_xlabel("Distance from Center", fontsize=12)
-        ax2.set_ylabel("Frequency", fontsize=12)
-        ax2.grid(True, alpha=0.3, linestyle='--')
-
-        # Add arena radius reference line
-        ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2,
-                   label=f'Arena Radius ({arena_radius:.2f})', alpha=0.8)
-        ax2.legend(loc='upper right', fontsize=10)
-
-        ax2.text(0.98, 0.98, f"n={len(from_center_numpy):,}",
-                transform=ax2.transAxes, ha='right', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-        plt.tight_layout()
-
         # Save to bot's folder
         bot_output_dir = os.path.join(output_dir, bot_name)
         os.makedirs(bot_output_dir, exist_ok=True)
         output_path = os.path.join(bot_output_dir, "distance_distribution.png")
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved to {output_path}")
-        plt.close(fig)
+        cache_bot_dir = os.path.join(cache_dir, bot_name) if cache_dir else None
+        cache_path = os.path.join(cache_bot_dir, "distance_distribution.csv") if cache_bot_dir else None
+
+        fig = plot_distance_distribution(combined_between, combined_from_center, bot_name, output_path, cache_path=cache_path)
+        if fig is not None:
+            plt.close(fig)
 
     # Create pooled distance distribution across all bots
     if bot_scope != "per_bot_only" and all_between_distances and bot_distance_data:
@@ -2247,46 +2470,99 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             series for data in bot_distance_data.values() for series in data["from_center"]
         ])
 
-        between_numpy = combined_between.to_numpy()
-        from_center_numpy = combined_from_center.to_numpy()
-
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
-
-        ax1.hist(between_numpy, bins=30, color='steelblue', edgecolor='black', alpha=0.7)
-        ax1.set_title("Distance Between Bots (All Bots, All Matchups)", fontsize=14, fontweight='bold')
-        ax1.set_xlabel("Distance Between Bots", fontsize=12)
-        ax1.set_ylabel("Frequency", fontsize=12)
-        ax1.grid(True, alpha=0.3, linestyle='--')
-        ax1.text(0.98, 0.98, f"n={len(between_numpy):,}",
-                transform=ax1.transAxes, ha='right', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-        ax2.hist(from_center_numpy, bins=30, color='green', edgecolor='black', alpha=0.7)
-        ax2.set_title("Distance from Center: All Bots", fontsize=14, fontweight='bold')
-        ax2.set_xlabel("Distance from Center", fontsize=12)
-        ax2.set_ylabel("Frequency", fontsize=12)
-        ax2.grid(True, alpha=0.3, linestyle='--')
-
-        ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2,
-                   label=f'Arena Radius ({arena_radius:.2f})', alpha=0.8)
-        ax2.legend(loc='upper right', fontsize=10)
-
-        ax2.text(0.98, 0.98, f"n={len(from_center_numpy):,}",
-                transform=ax2.transAxes, ha='right', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-        plt.tight_layout()
-
         agg_output_dir = os.path.join(output_dir, "All_Bots_Combined")
         os.makedirs(agg_output_dir, exist_ok=True)
         output_path = os.path.join(agg_output_dir, "distance_distribution.png")
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved to {output_path}")
-        plt.close(fig)
+        agg_cache_dir = os.path.join(cache_dir, "All_Bots_Combined") if cache_dir else None
+        cache_path = os.path.join(agg_cache_dir, "distance_distribution.csv") if agg_cache_dir else None
+
+        fig = plot_distance_distribution(combined_between, combined_from_center, "All Bots", output_path, cache_path=cache_path, is_pooled=True)
+        if fig is not None:
+            plt.close(fig)
 
     print("\n" + "=" * 60)
     print(f"✅ Completed! All visualizations saved to: {output_dir}")
     print("=" * 60)
+
+
+def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filter_bots=None):
+    """
+    Regenerate chart PNGs from the CSVs written by
+    create_phased_heatmaps_all_bots(cache_dir=...), without touching the raw simulation
+    data. Use this to iterate on chart design (titles, labels, colors, bins) - edit the
+    _render_* functions in this file, then rerun this instead of the full pipeline.
+
+    Args:
+        cache_dir: Directory previously passed as cache_dir to create_phased_heatmaps_all_bots
+        output_dir: Where to write the regenerated PNGs (mirrors cache_dir's bot-folder structure)
+        actor_position: Position filter text to show in chart titles ("left"/"right"/"both")
+        filter_bots: Optional list of cache subfolder names to restrict to (e.g. ["Bot_BT"]).
+            Subfolder names include "All_Bots_Combined" for the pooled aggregate.
+
+    Returns:
+        Number of charts regenerated.
+    """
+    if not os.path.isdir(cache_dir):
+        print(f"Cache directory not found: {cache_dir}")
+        return 0
+
+    phase_names = ["Early Game", "Mid Game", "Late Game"]
+    bot_dirs = sorted(d for d in os.listdir(cache_dir) if os.path.isdir(os.path.join(cache_dir, d)))
+    if filter_bots:
+        bot_dirs = [d for d in bot_dirs if d in filter_bots]
+
+    count = 0
+    for bot_name in bot_dirs:
+        cache_bot_dir = os.path.join(cache_dir, bot_name)
+        out_bot_dir = os.path.join(output_dir, bot_name)
+        os.makedirs(out_bot_dir, exist_ok=True)
+
+        for fname in sorted(os.listdir(cache_bot_dir)):
+            if not fname.endswith(".csv"):
+                continue
+            cache_path = os.path.join(cache_bot_dir, fname)
+            stem = fname[:-len(".csv")]
+            output_path = os.path.join(out_bot_dir, f"{stem}.png")
+            needs_manual_save = False
+
+            if stem.startswith("timer_"):
+                label = f"Timer {stem[len('timer_'):]}s"
+                fig = plot_joint_heatmap_from_cache(cache_path, label, bot_name, actor_position)
+                needs_manual_save = True
+            elif stem.startswith("window_"):
+                label = stem[len("window_"):]
+                fig = plot_joint_heatmap_from_cache(cache_path, label, bot_name, actor_position)
+                needs_manual_save = True
+            elif stem in ("0", "1", "2"):
+                fig = plot_joint_heatmap_from_cache(cache_path, phase_names[int(stem)], bot_name, actor_position)
+                needs_manual_save = True
+            elif stem == "position_distribution":
+                fig = plot_position_distribution_from_cache(cache_path, bot_name, actor_position)
+                needs_manual_save = True
+            elif stem == "distance_histogram":
+                fig = plot_distance_histogram_from_cache(cache_path, bot_name, output_path)
+            elif stem == "distance_from_center_histogram":
+                fig = plot_distance_from_center_histogram_from_cache(cache_path, bot_name, output_path)
+            elif stem == "distance_over_time":
+                fig = plot_distance_over_time_from_cache(cache_path, bot_name, output_path)
+            elif stem == "distance_distribution":
+                name = "All Bots" if bot_name == "All_Bots_Combined" else bot_name
+                fig = plot_distance_distribution_from_cache(cache_path, name, output_path, is_pooled=(bot_name == "All_Bots_Combined"))
+            else:
+                print(f"  Skipping unrecognized cache file: {cache_path}")
+                continue
+
+            if fig is not None:
+                if needs_manual_save:
+                    # The heatmap/position variants return a figure without saving it
+                    # themselves; the distance_* variants above already saved via output_path.
+                    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                    print(f"  Saved to {output_path}")
+                plt.close(fig)
+                count += 1
+
+    print(f"\n✅ Regenerated {count} charts from cache into {output_dir}")
+    return count
 
 
 if __name__ == "__main__":
@@ -2349,6 +2625,13 @@ Examples:
 
   # Test mode: process 5 configs per matchup
   python detailed_analyzer.py all --test=5 --use-timer
+
+  # All analyses, also caching each chart's raw sample data as CSV for fast re-rendering
+  python detailed_analyzer.py all --cache-dir arena_heatmaps_cache
+
+  # Redraw all charts from that cache (e.g. after tweaking a title/label/color in the
+  # _render_* functions) without rescanning the (potentially huge) simulation data
+  python detailed_analyzer.py render-cache arena_heatmaps_cache -o arena_heatmaps_v2
         """
     )
 
@@ -2396,6 +2679,19 @@ Examples:
                            help="Skip initial N seconds of data to remove spawn point bias (default: 0.0)")
     all_parser.add_argument("--test", type=int, nargs='?', const=1, default=None,
                            help="Test mode: process only N configs per matchup for quick testing (default: 1 if flag is used)")
+    all_parser.add_argument("--cache-dir",
+                           help="Also write a small CSV of each chart's raw sample data under this directory. "
+                                "Pass it to `render-cache` afterward to redraw charts (title/label/color tweaks) "
+                                "without rescanning the simulation data.")
+
+    # Render charts from a previously written data cache (fast, no raw data access)
+    render_cache_parser = subparsers.add_parser("render-cache",
+        help="Redraw chart PNGs from a --cache-dir written by 'all', without touching raw simulation data")
+    render_cache_parser.add_argument("cache_dir", help="Cache directory previously passed as --cache-dir to 'all'")
+    render_cache_parser.add_argument("-o", "--output", default="arena_heatmaps_rendered",
+                                    help="Output directory for regenerated PNGs (default: arena_heatmaps_rendered)")
+    render_cache_parser.add_argument("-p", "--position", choices=["left", "right", "both"], default="both",
+                                    help="Position filter text shown in chart titles (default: both)")
 
     # Distance distributions mode
     distance_parser = subparsers.add_parser("distance", help="Generate distance distribution plots per bot (averaged across matchups)")
@@ -2476,7 +2772,8 @@ Examples:
             args.use_timer,
             args.use_time_windows,
             include_distance_over_time=True,  # Generate distance plots (only with --use-timer)
-            skip_initial=args.skip_initial
+            skip_initial=args.skip_initial,
+            cache_dir=args.cache_dir
         )
 
         print("\n" + "=" * 60)
@@ -2511,6 +2808,13 @@ Examples:
             args.output,
             args.chunksize,
             args.max_configs
+        )
+
+    elif args.command == "render-cache":
+        render_charts_from_cache(
+            args.cache_dir,
+            args.output,
+            args.position
         )
 
     else:
