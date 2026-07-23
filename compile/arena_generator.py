@@ -434,8 +434,8 @@ def _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, n_samples)
     ax_main.add_artist(circle)
 
     # Configure main axis
-    ax_main.set_xlabel("X Position (shifted)", fontsize=12)
-    ax_main.set_ylabel("Y Position (shifted)", fontsize=12)
+    ax_main.set_xlabel("X Position", fontsize=12)
+    ax_main.set_ylabel("Y Position", fontsize=12)
     ax_main.set_aspect("equal", adjustable="box")
     ax_main.set_xlim(0 - arena_radius - 1, 0 + arena_radius + 1)
     ax_main.set_ylim(0 - arena_radius - 1, 0 + arena_radius + 1)
