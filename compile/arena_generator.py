@@ -250,6 +250,17 @@ def _write_cache_csv(df, cache_path):
     df.write_csv(cache_path)
 
 
+def _cached_files(cache_dir_path, pattern):
+    """
+    Return sorted cache CSV paths matching pattern under cache_dir_path, or [] if the
+    directory doesn't exist. Purely an existence check - it does NOT verify the cache was
+    produced with the same skip_initial/actor_position/etc params as the current call.
+    """
+    if not cache_dir_path or not os.path.isdir(cache_dir_path):
+        return []
+    return sorted(glob.glob(os.path.join(cache_dir_path, pattern)))
+
+
 def plot_position_distribution(df_combined, bot_name, actor_position="both", cache_path=None):
     """
     Plot X and Y position distributions in a single frame (overlaid histograms)
@@ -1914,7 +1925,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     print(f"✅ Completed! Distance distribution plots saved in bot folders")
     print("=" * 60)
 
-def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all", cache_dir=None):
+def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all", cache_dir=None, use_cache_if_exists=False):
     """
     Create heatmaps and position distribution plots for all bots in the simulation directory
     Saves individual phase/timer images for each bot, plus a pooled "All_Bots_Combined"
@@ -1943,6 +1954,14 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             set, every chart also writes its cache CSV alongside the PNG. Once populated,
             pass this directory to render_charts_from_cache() to redraw all charts (e.g.
             after tweaking titles/labels/colors) without rescanning the simulation data.
+        use_cache_if_exists: If True and cache_dir already has a chart's CSV, skip the
+            expensive load/compute for that chart and render straight from the cached CSV
+            instead - so calling this function again with the same cache_dir is fast rather
+            than always re-scanning the simulation data. This is a pure existence check: it
+            does NOT verify the cache was produced with the same skip_initial/actor_position/
+            use_timer/use_time_windows/etc as the current call. If you change any of those,
+            delete the stale cache_dir (or the affected bot subfolders) first, or you'll get
+            charts rendered from mismatched cached data with no warning.
     """
     if bot_scope not in ("all", "aggregate_only", "per_bot_only"):
         raise ValueError(f"bot_scope must be 'all', 'aggregate_only', or 'per_bot_only', got {bot_scope!r}")
@@ -1996,7 +2015,21 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
         # Generate heatmaps if requested
         if mode in ["heatmap", "all"]:
-            if use_timer:
+            if use_timer and use_cache_if_exists and _cached_files(cache_bot_dir, "timer_*.csv"):
+                cached_timers = _cached_files(cache_bot_dir, "timer_*.csv")
+                print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} timer heatmaps from {len(cached_timers)} cached CSV(s) instead of reloading...")
+                for cache_path in cached_timers:
+                    output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
+                    _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
+
+                if include_distance_over_time:
+                    for stem in ("distance_over_time", "distance_histogram", "distance_from_center_histogram"):
+                        cp = os.path.join(cache_bot_dir, f"{stem}.csv")
+                        if os.path.exists(cp):
+                            output_path = os.path.join(bot_dir, f"{stem}.png")
+                            _render_single_cached_chart(cp, bot_name, output_path, actor_position)
+
+            elif use_timer:
                 # Timer-based mode - load data with distance if needed
                 print("\nLoading data grouped by Timer...")
                 if include_distance_over_time:
@@ -2070,6 +2103,13 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     if fig is not None:
                         plt.close(fig)
 
+            elif use_time_windows and use_cache_if_exists and _cached_files(cache_bot_dir, "window_*.csv"):
+                cached_windows = _cached_files(cache_bot_dir, "window_*.csv")
+                print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} time-window heatmaps from {len(cached_windows)} cached CSV(s) instead of reloading...")
+                for cache_path in cached_windows:
+                    output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
+                    _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
+
             elif use_time_windows:
                 # Time window mode - fixed time windows [0-15s, 15-30s, 30-45s, 45-60s]
                 print("\nLoading all data for time window grouping...")
@@ -2127,6 +2167,13 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         print(f"  Saved to {output_path}")
                         plt.close(fig)
 
+            elif use_cache_if_exists and _cached_files(cache_bot_dir, "[0-2].csv"):
+                cached_phases = _cached_files(cache_bot_dir, "[0-2].csv")
+                print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} phase heatmaps from {len(cached_phases)} cached CSV(s) instead of reloading...")
+                for cache_path in cached_phases:
+                    output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
+                    _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
+
             else:
                 # Phase-based mode (original)
                 print("\nLoading all data...")
@@ -2177,34 +2224,43 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
         # Generate position distribution if requested
         if mode in ["position", "all"]:
-            # Load combined data if not already loaded (needed for position distribution)
-            if use_timer or use_time_windows:
-                print("\nLoading combined data for position distribution...")
-                df_combined = load_bot_data_from_simulation(base_dir, bot_name, actor_position, chunksize, max_configs, group_by_timer=False)
+            position_cache_path = os.path.join(cache_bot_dir, "position_distribution.csv") if cache_bot_dir else None
 
-                # Apply skip_initial filter if specified (per game)
-                if skip_initial > 0 and not df_combined.is_empty():
-                    print(f"\n⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
-                    original_count = len(df_combined)
-                    df_combined = df_combined.filter(
-                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
-                    )
-                    print(f"  Filtered: {original_count:,} -> {len(df_combined):,} samples")
-
-            # Check if we have data
-            if 'df_combined' in locals() and not df_combined.is_empty():
-                # Create position distribution plot
-                print(f"Creating position distribution plot...")
-                cache_path = os.path.join(cache_bot_dir, "position_distribution.csv") if cache_bot_dir else None
-                fig_dist = plot_position_distribution(df_combined, bot_name, actor_position, cache_path=cache_path)
-
-                if fig_dist is not None:
-                    dist_path = os.path.join(bot_dir, "position_distribution.png")
-                    fig_dist.savefig(dist_path, dpi=150, bbox_inches='tight')
-                    print(f"  Saved to {dist_path}")
-                    plt.close(fig_dist)
+            if use_cache_if_exists and position_cache_path and os.path.exists(position_cache_path):
+                print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} position distribution from cached CSV instead of reloading...")
+                dist_path = os.path.join(bot_dir, "position_distribution.png")
+                _render_single_cached_chart(position_cache_path, bot_name, dist_path, actor_position)
             else:
-                print(f"No data available for position distribution")
+                # Load combined data if not already loaded (needed for position distribution).
+                # Also reload if df_combined never got set - e.g. the phase-mode heatmap
+                # section above was skipped via use_cache_if_exists, or mode="position" ran
+                # without the heatmap section ever executing.
+                if use_timer or use_time_windows or 'df_combined' not in locals():
+                    print("\nLoading combined data for position distribution...")
+                    df_combined = load_bot_data_from_simulation(base_dir, bot_name, actor_position, chunksize, max_configs, group_by_timer=False)
+
+                    # Apply skip_initial filter if specified (per game)
+                    if skip_initial > 0 and not df_combined.is_empty():
+                        print(f"\n⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
+                        original_count = len(df_combined)
+                        df_combined = df_combined.filter(
+                            pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                        )
+                        print(f"  Filtered: {original_count:,} -> {len(df_combined):,} samples")
+
+                # Check if we have data
+                if 'df_combined' in locals() and not df_combined.is_empty():
+                    # Create position distribution plot
+                    print(f"Creating position distribution plot...")
+                    fig_dist = plot_position_distribution(df_combined, bot_name, actor_position, cache_path=position_cache_path)
+
+                    if fig_dist is not None:
+                        dist_path = os.path.join(bot_dir, "position_distribution.png")
+                        fig_dist.savefig(dist_path, dpi=150, bbox_inches='tight')
+                        print(f"  Saved to {dist_path}")
+                        plt.close(fig_dist)
+                else:
+                    print(f"No data available for position distribution")
 
     # ========== Generate aggregate "All Bots" heatmap + position distribution ==========
     # Pools every bot's position samples together (bot identity dropped), so it needs its
@@ -2222,7 +2278,21 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         agg_df_combined = None
 
         if mode in ["heatmap", "all"]:
-            if use_timer:
+            if use_timer and use_cache_if_exists and _cached_files(agg_cache_dir, "timer_*.csv"):
+                agg_cached_timers = _cached_files(agg_cache_dir, "timer_*.csv")
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled timer heatmaps from {len(agg_cached_timers)} cached CSV(s) instead of reloading...")
+                for cache_path in agg_cached_timers:
+                    output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
+                    _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
+
+                if include_distance_over_time:
+                    for stem in ("distance_over_time", "distance_histogram", "distance_from_center_histogram"):
+                        cp = os.path.join(agg_cache_dir, f"{stem}.csv")
+                        if os.path.exists(cp):
+                            output_path = os.path.join(agg_dir, f"{stem}.png")
+                            _render_single_cached_chart(cp, agg_label, output_path, actor_position)
+
+            elif use_timer:
                 print("\nLoading pooled data grouped by Timer...")
                 if include_distance_over_time:
                     agg_timer_data, agg_distance_data = load_all_bots_data_from_simulation(
@@ -2281,6 +2351,13 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         if fig is not None:
                             plt.close(fig)
 
+            elif use_time_windows and use_cache_if_exists and _cached_files(agg_cache_dir, "window_*.csv"):
+                agg_cached_windows = _cached_files(agg_cache_dir, "window_*.csv")
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled time-window heatmaps from {len(agg_cached_windows)} cached CSV(s) instead of reloading...")
+                for cache_path in agg_cached_windows:
+                    output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
+                    _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
+
             elif use_time_windows:
                 print("\nLoading pooled data for time window grouping...")
                 agg_df_combined = load_all_bots_data_from_simulation(
@@ -2314,6 +2391,13 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                             print(f"  Saved to {output_path}")
                             plt.close(fig)
 
+            elif use_cache_if_exists and _cached_files(agg_cache_dir, "[0-2].csv"):
+                agg_cached_phases = _cached_files(agg_cache_dir, "[0-2].csv")
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled phase heatmaps from {len(agg_cached_phases)} cached CSV(s) instead of reloading...")
+                for cache_path in agg_cached_phases:
+                    output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
+                    _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
+
             else:
                 print("\nLoading pooled data...")
                 agg_df_combined = load_all_bots_data_from_simulation(
@@ -2344,145 +2428,236 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                             plt.close(fig)
 
         if mode in ["position", "all"]:
-            if agg_df_combined is None or agg_df_combined.is_empty():
-                print("\nLoading pooled data for position distribution...")
-                agg_df_combined = load_all_bots_data_from_simulation(
-                    base_dir, chunksize, max_configs, group_by_timer=False,
-                    input_format=input_format, filter_matchups=filter_matchups
-                )
-                if not agg_df_combined.is_empty() and skip_initial > 0:
-                    agg_df_combined = agg_df_combined.filter(
-                        pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
-                    )
+            agg_position_cache_path = os.path.join(agg_cache_dir, "position_distribution.csv") if agg_cache_dir else None
 
-            if not agg_df_combined.is_empty():
-                print("Creating pooled position distribution plot...")
-                cache_path = os.path.join(agg_cache_dir, "position_distribution.csv") if agg_cache_dir else None
-                fig_dist = plot_position_distribution(agg_df_combined, agg_label, actor_position, cache_path=cache_path)
-                if fig_dist is not None:
-                    dist_path = os.path.join(agg_dir, "position_distribution.png")
-                    fig_dist.savefig(dist_path, dpi=150, bbox_inches='tight')
-                    print(f"  Saved to {dist_path}")
-                    plt.close(fig_dist)
+            if use_cache_if_exists and agg_position_cache_path and os.path.exists(agg_position_cache_path):
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled position distribution from cached CSV instead of reloading...")
+                dist_path = os.path.join(agg_dir, "position_distribution.png")
+                _render_single_cached_chart(agg_position_cache_path, agg_label, dist_path, actor_position)
+
             else:
-                print("No pooled data available for position distribution")
+                if agg_df_combined is None or agg_df_combined.is_empty():
+                    print("\nLoading pooled data for position distribution...")
+                    agg_df_combined = load_all_bots_data_from_simulation(
+                        base_dir, chunksize, max_configs, group_by_timer=False,
+                        input_format=input_format, filter_matchups=filter_matchups
+                    )
+                    if not agg_df_combined.is_empty() and skip_initial > 0:
+                        agg_df_combined = agg_df_combined.filter(
+                            pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                        )
+
+                if not agg_df_combined.is_empty():
+                    print("Creating pooled position distribution plot...")
+                    fig_dist = plot_position_distribution(agg_df_combined, agg_label, actor_position, cache_path=agg_position_cache_path)
+                    if fig_dist is not None:
+                        dist_path = os.path.join(agg_dir, "position_distribution.png")
+                        fig_dist.savefig(dist_path, dpi=150, bbox_inches='tight')
+                        print(f"  Saved to {dist_path}")
+                        plt.close(fig_dist)
+                else:
+                    print("No pooled data available for position distribution")
 
     # ========== Generate distance distributions per bot ==========
     print("\n" + "=" * 60)
     print("Generating distance distributions for each bot (across all matchups)...")
     print("=" * 60)
 
-    # Collect data per bot (across all matchups)
-    bot_distance_data = {}  # {bot_name: [distance_between_series, distance_from_center_series]}
-    # Distance-between is symmetric and gets appended to BOTH bot1's and bot2's entries in
-    # bot_distance_data above, so pooling across bot_distance_data would double-count every
-    # matchup's series. Collect it once per matchup here instead, for the aggregate below.
-    all_between_distances = []
+    # This section computes every bot's distance_distribution.csv in a single pass over
+    # matchup_folders (data isn't per-bot separable up front), so the cache check needs to
+    # confirm ALL expected outputs already exist before it can skip that pass entirely.
+    required_distance_dist_caches = []
+    if cache_dir:
+        if bot_scope != "aggregate_only":
+            required_distance_dist_caches += [os.path.join(cache_dir, b, "distance_distribution.csv") for b in bot_names]
+        if bot_scope != "per_bot_only":
+            required_distance_dist_caches.append(os.path.join(cache_dir, "All_Bots_Combined", "distance_distribution.csv"))
 
-    # Process each matchup
-    for matchup_folder in matchup_folders:
-        print("\n" + "=" * 60)
-        print(f"Processing matchup: {matchup_folder}")
-        print("=" * 60)
+    if use_cache_if_exists and required_distance_dist_caches and all(os.path.exists(p) for p in required_distance_dist_caches):
+        print(f"\n♻️  use_cache_if_exists=True: rendering {len(required_distance_dist_caches)} distance_distribution chart(s) from cache instead of reloading...")
+        for cache_path in required_distance_dist_caches:
+            cached_bot_name = os.path.basename(os.path.dirname(cache_path))
+            name = "All Bots" if cached_bot_name == "All_Bots_Combined" else cached_bot_name
+            output_path = os.path.join(output_dir, cached_bot_name, "distance_distribution.png")
+            _render_single_cached_chart(cache_path, name, output_path, actor_position)
 
-        # Extract bot names
-        parts = matchup_folder.split("_vs_")
-        if len(parts) != 2:
-            print(f"  Skipping invalid matchup folder name: {matchup_folder}")
-            continue
+    else:
+        # Collect data per bot (across all matchups)
+        bot_distance_data = {}  # {bot_name: [distance_between_series, distance_from_center_series]}
+        # Distance-between is symmetric and gets appended to BOTH bot1's and bot2's entries in
+        # bot_distance_data above, so pooling across bot_distance_data would double-count every
+        # matchup's series. Collect it once per matchup here instead, for the aggregate below.
+        all_between_distances = []
 
-        bot1_name, bot2_name = parts[0], parts[1]
+        # Process each matchup
+        for matchup_folder in matchup_folders:
+            print("\n" + "=" * 60)
+            print(f"Processing matchup: {matchup_folder}")
+            print("=" * 60)
 
-        # Load data for this matchup
-        df = load_all_game_data(base_dir, bot1_name, bot2_name, chunksize, max_configs, input_format)
-
-        if df.is_empty():
-            print(f"  No data found for {matchup_folder}, skipping...")
-            continue
-
-        # Apply skip_initial filter if specified (per game)
-        if skip_initial > 0:
-            print(f"  ⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
-            df = df.filter(
-                pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
-            )
-            if df.is_empty():
-                print(f"  No data remaining after skipping initial {skip_initial}s, skipping matchup...")
+            # Extract bot names
+            parts = matchup_folder.split("_vs_")
+            if len(parts) != 2:
+                print(f"  Skipping invalid matchup folder name: {matchup_folder}")
                 continue
-            print(f"  Samples after filter: {len(df):,}")
 
-        # Calculate distance between bots
-        print("  Calculating distance between bots...")
-        dist_between = calculate_distance_between_bots(df)
-        all_between_distances.append(dist_between["Distance"])
+            bot1_name, bot2_name = parts[0], parts[1]
 
-        # Calculate distance from center for each bot
-        print("  Calculating distance from center...")
-        df_with_center_dist = calculate_distance_from_center(df)
+            # Load data for this matchup
+            df = load_all_game_data(base_dir, bot1_name, bot2_name, chunksize, max_configs, input_format)
 
-        # Split by actor - bot1 is actor 0, bot2 is actor 1
-        bot1_center_dist = df_with_center_dist.filter(pl.col("Actor").cast(pl.Int64) == 0)["DistanceFromCenter"]
-        bot2_center_dist = df_with_center_dist.filter(pl.col("Actor").cast(pl.Int64) == 1)["DistanceFromCenter"]
+            if df.is_empty():
+                print(f"  No data found for {matchup_folder}, skipping...")
+                continue
 
-        # Store data for each bot
-        if bot1_name not in bot_distance_data:
-            bot_distance_data[bot1_name] = {"between": [], "from_center": []}
-        if bot2_name not in bot_distance_data:
-            bot_distance_data[bot2_name] = {"between": [], "from_center": []}
+            # Apply skip_initial filter if specified (per game)
+            if skip_initial > 0:
+                print(f"  ⏩ Skipping initial {skip_initial}s of data per game to remove spawn bias...")
+                df = df.filter(
+                    pl.col("UpdatedAt") >= pl.col("UpdatedAt").min().over(["GameIndex", "RoundIndex"]) + skip_initial
+                )
+                if df.is_empty():
+                    print(f"  No data remaining after skipping initial {skip_initial}s, skipping matchup...")
+                    continue
+                print(f"  Samples after filter: {len(df):,}")
 
-        # Add distance between for both bots (it's the same data)
-        bot_distance_data[bot1_name]["between"].append(dist_between["Distance"])
-        bot_distance_data[bot2_name]["between"].append(dist_between["Distance"])
+            # Calculate distance between bots
+            print("  Calculating distance between bots...")
+            dist_between = calculate_distance_between_bots(df)
+            all_between_distances.append(dist_between["Distance"])
 
-        # Add distance from center for each bot
-        bot_distance_data[bot1_name]["from_center"].append(bot1_center_dist)
-        bot_distance_data[bot2_name]["from_center"].append(bot2_center_dist)
+            # Calculate distance from center for each bot
+            print("  Calculating distance from center...")
+            df_with_center_dist = calculate_distance_from_center(df)
 
-    # Create distance distribution plot for each bot
-    for bot_name, data in ({} if bot_scope == "aggregate_only" else bot_distance_data).items():
-        print("\n" + "=" * 60)
-        print(f"Creating distance distribution for {bot_name}...")
-        print("=" * 60)
+            # Split by actor - bot1 is actor 0, bot2 is actor 1
+            bot1_center_dist = df_with_center_dist.filter(pl.col("Actor").cast(pl.Int64) == 0)["DistanceFromCenter"]
+            bot2_center_dist = df_with_center_dist.filter(pl.col("Actor").cast(pl.Int64) == 1)["DistanceFromCenter"]
 
-        # Concatenate all data for this bot
-        combined_between = pl.concat(data["between"])
-        combined_from_center = pl.concat(data["from_center"])
+            # Store data for each bot
+            if bot1_name not in bot_distance_data:
+                bot_distance_data[bot1_name] = {"between": [], "from_center": []}
+            if bot2_name not in bot_distance_data:
+                bot_distance_data[bot2_name] = {"between": [], "from_center": []}
 
-        # Save to bot's folder
-        bot_output_dir = os.path.join(output_dir, bot_name)
-        os.makedirs(bot_output_dir, exist_ok=True)
-        output_path = os.path.join(bot_output_dir, "distance_distribution.png")
-        cache_bot_dir = os.path.join(cache_dir, bot_name) if cache_dir else None
-        cache_path = os.path.join(cache_bot_dir, "distance_distribution.csv") if cache_bot_dir else None
+            # Add distance between for both bots (it's the same data)
+            bot_distance_data[bot1_name]["between"].append(dist_between["Distance"])
+            bot_distance_data[bot2_name]["between"].append(dist_between["Distance"])
 
-        fig = plot_distance_distribution(combined_between, combined_from_center, bot_name, output_path, cache_path=cache_path)
-        if fig is not None:
-            plt.close(fig)
+            # Add distance from center for each bot
+            bot_distance_data[bot1_name]["from_center"].append(bot1_center_dist)
+            bot_distance_data[bot2_name]["from_center"].append(bot2_center_dist)
 
-    # Create pooled distance distribution across all bots
-    if bot_scope != "per_bot_only" and all_between_distances and bot_distance_data:
-        print("\n" + "=" * 60)
-        print("Creating pooled distance distribution for All Bots...")
-        print("=" * 60)
+        # Create distance distribution plot for each bot
+        for bot_name, data in ({} if bot_scope == "aggregate_only" else bot_distance_data).items():
+            print("\n" + "=" * 60)
+            print(f"Creating distance distribution for {bot_name}...")
+            print("=" * 60)
 
-        combined_between = pl.concat(all_between_distances)
-        combined_from_center = pl.concat([
-            series for data in bot_distance_data.values() for series in data["from_center"]
-        ])
+            # Concatenate all data for this bot
+            combined_between = pl.concat(data["between"])
+            combined_from_center = pl.concat(data["from_center"])
 
-        agg_output_dir = os.path.join(output_dir, "All_Bots_Combined")
-        os.makedirs(agg_output_dir, exist_ok=True)
-        output_path = os.path.join(agg_output_dir, "distance_distribution.png")
-        agg_cache_dir = os.path.join(cache_dir, "All_Bots_Combined") if cache_dir else None
-        cache_path = os.path.join(agg_cache_dir, "distance_distribution.csv") if agg_cache_dir else None
+            # Save to bot's folder
+            bot_output_dir = os.path.join(output_dir, bot_name)
+            os.makedirs(bot_output_dir, exist_ok=True)
+            output_path = os.path.join(bot_output_dir, "distance_distribution.png")
+            cache_bot_dir = os.path.join(cache_dir, bot_name) if cache_dir else None
+            cache_path = os.path.join(cache_bot_dir, "distance_distribution.csv") if cache_bot_dir else None
 
-        fig = plot_distance_distribution(combined_between, combined_from_center, "All Bots", output_path, cache_path=cache_path, is_pooled=True)
-        if fig is not None:
-            plt.close(fig)
+            fig = plot_distance_distribution(combined_between, combined_from_center, bot_name, output_path, cache_path=cache_path)
+            if fig is not None:
+                plt.close(fig)
+
+        # Create pooled distance distribution across all bots
+        if bot_scope != "per_bot_only" and all_between_distances and bot_distance_data:
+            print("\n" + "=" * 60)
+            print("Creating pooled distance distribution for All Bots...")
+            print("=" * 60)
+
+            combined_between = pl.concat(all_between_distances)
+            combined_from_center = pl.concat([
+                series for data in bot_distance_data.values() for series in data["from_center"]
+            ])
+
+            agg_output_dir = os.path.join(output_dir, "All_Bots_Combined")
+            os.makedirs(agg_output_dir, exist_ok=True)
+            output_path = os.path.join(agg_output_dir, "distance_distribution.png")
+            agg_cache_dir = os.path.join(cache_dir, "All_Bots_Combined") if cache_dir else None
+            cache_path = os.path.join(agg_cache_dir, "distance_distribution.csv") if agg_cache_dir else None
+
+            fig = plot_distance_distribution(combined_between, combined_from_center, "All Bots", output_path, cache_path=cache_path, is_pooled=True)
+            if fig is not None:
+                plt.close(fig)
 
     print("\n" + "=" * 60)
     print(f"✅ Completed! All visualizations saved to: {output_dir}")
     print("=" * 60)
+
+
+_PHASE_NAMES = ["Early Game", "Mid Game", "Late Game"]
+
+
+def _render_single_cached_chart(cache_path, name, output_path, actor_position="both"):
+    """
+    Dispatch a single cache CSV (named by create_phased_heatmaps_all_bots' cache_path
+    convention: timer_*.csv, window_*.csv, {0,1,2}.csv, position_distribution.csv,
+    distance_histogram.csv, distance_from_center_histogram.csv, distance_over_time.csv,
+    distance_distribution.csv) to the matching *_from_cache render function and save the
+    result to output_path. Shared by render_charts_from_cache() and
+    create_phased_heatmaps_all_bots(use_cache_if_exists=True).
+
+    Args:
+        cache_path: Path to the cached CSV
+        name: Bot name, or "All Bots" for the pooled aggregate (used in chart titles)
+        output_path: Where to save the regenerated PNG
+        actor_position: Position filter text to show in heatmap/position chart titles
+
+    Returns:
+        True if a chart was rendered and saved, False if the filename wasn't recognized
+        or the cached data was empty.
+    """
+    stem = Path(cache_path).stem
+    is_pooled = os.path.basename(os.path.dirname(cache_path)) == "All_Bots_Combined"
+    needs_manual_save = False
+
+    if stem.startswith("timer_"):
+        label = f"Timer {stem[len('timer_'):]}s"
+        fig = plot_joint_heatmap_from_cache(cache_path, label, name, actor_position)
+        needs_manual_save = True
+    elif stem.startswith("window_"):
+        label = stem[len("window_"):]
+        fig = plot_joint_heatmap_from_cache(cache_path, label, name, actor_position)
+        needs_manual_save = True
+    elif stem in ("0", "1", "2"):
+        fig = plot_joint_heatmap_from_cache(cache_path, _PHASE_NAMES[int(stem)], name, actor_position)
+        needs_manual_save = True
+    elif stem == "position_distribution":
+        fig = plot_position_distribution_from_cache(cache_path, name, actor_position)
+        needs_manual_save = True
+    elif stem == "distance_histogram":
+        fig = plot_distance_histogram_from_cache(cache_path, name, output_path)
+    elif stem == "distance_from_center_histogram":
+        fig = plot_distance_from_center_histogram_from_cache(cache_path, name, output_path)
+    elif stem == "distance_over_time":
+        fig = plot_distance_over_time_from_cache(cache_path, name, output_path)
+    elif stem == "distance_distribution":
+        fig = plot_distance_distribution_from_cache(cache_path, name, output_path, is_pooled=is_pooled)
+    else:
+        print(f"  Skipping unrecognized cache file: {cache_path}")
+        return False
+
+    if fig is None:
+        return False
+
+    if needs_manual_save:
+        # The heatmap/position variants return a figure without saving it themselves;
+        # the distance_* variants above already saved via output_path.
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved to {output_path}")
+    plt.close(fig)
+    return True
 
 
 def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filter_bots=None):
@@ -2506,7 +2681,6 @@ def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filte
         print(f"Cache directory not found: {cache_dir}")
         return 0
 
-    phase_names = ["Early Game", "Mid Game", "Late Game"]
     bot_dirs = sorted(d for d in os.listdir(cache_dir) if os.path.isdir(os.path.join(cache_dir, d)))
     if filter_bots:
         bot_dirs = [d for d in bot_dirs if d in filter_bots]
@@ -2515,50 +2689,14 @@ def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filte
     for bot_name in bot_dirs:
         cache_bot_dir = os.path.join(cache_dir, bot_name)
         out_bot_dir = os.path.join(output_dir, bot_name)
-        os.makedirs(out_bot_dir, exist_ok=True)
+        name = "All Bots" if bot_name == "All_Bots_Combined" else bot_name
 
         for fname in sorted(os.listdir(cache_bot_dir)):
             if not fname.endswith(".csv"):
                 continue
             cache_path = os.path.join(cache_bot_dir, fname)
-            stem = fname[:-len(".csv")]
-            output_path = os.path.join(out_bot_dir, f"{stem}.png")
-            needs_manual_save = False
-
-            if stem.startswith("timer_"):
-                label = f"Timer {stem[len('timer_'):]}s"
-                fig = plot_joint_heatmap_from_cache(cache_path, label, bot_name, actor_position)
-                needs_manual_save = True
-            elif stem.startswith("window_"):
-                label = stem[len("window_"):]
-                fig = plot_joint_heatmap_from_cache(cache_path, label, bot_name, actor_position)
-                needs_manual_save = True
-            elif stem in ("0", "1", "2"):
-                fig = plot_joint_heatmap_from_cache(cache_path, phase_names[int(stem)], bot_name, actor_position)
-                needs_manual_save = True
-            elif stem == "position_distribution":
-                fig = plot_position_distribution_from_cache(cache_path, bot_name, actor_position)
-                needs_manual_save = True
-            elif stem == "distance_histogram":
-                fig = plot_distance_histogram_from_cache(cache_path, bot_name, output_path)
-            elif stem == "distance_from_center_histogram":
-                fig = plot_distance_from_center_histogram_from_cache(cache_path, bot_name, output_path)
-            elif stem == "distance_over_time":
-                fig = plot_distance_over_time_from_cache(cache_path, bot_name, output_path)
-            elif stem == "distance_distribution":
-                name = "All Bots" if bot_name == "All_Bots_Combined" else bot_name
-                fig = plot_distance_distribution_from_cache(cache_path, name, output_path, is_pooled=(bot_name == "All_Bots_Combined"))
-            else:
-                print(f"  Skipping unrecognized cache file: {cache_path}")
-                continue
-
-            if fig is not None:
-                if needs_manual_save:
-                    # The heatmap/position variants return a figure without saving it
-                    # themselves; the distance_* variants above already saved via output_path.
-                    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-                    print(f"  Saved to {output_path}")
-                plt.close(fig)
+            output_path = os.path.join(out_bot_dir, f"{Path(fname).stem}.png")
+            if _render_single_cached_chart(cache_path, name, output_path, actor_position):
                 count += 1
 
     print(f"\n✅ Regenerated {count} charts from cache into {output_dir}")
@@ -2683,6 +2821,11 @@ Examples:
                            help="Also write a small CSV of each chart's raw sample data under this directory. "
                                 "Pass it to `render-cache` afterward to redraw charts (title/label/color tweaks) "
                                 "without rescanning the simulation data.")
+    all_parser.add_argument("--use-cache-if-exists", action="store_true",
+                           help="With --cache-dir: skip the expensive reload for any chart whose cache CSV "
+                                "already exists there, rendering straight from cache instead. Existence-only "
+                                "check - does not validate the cache matches these params, so delete stale "
+                                "cache_dir contents first if skip-initial/position/etc changed since it was written.")
 
     # Render charts from a previously written data cache (fast, no raw data access)
     render_cache_parser = subparsers.add_parser("render-cache",
@@ -2773,7 +2916,8 @@ Examples:
             args.use_time_windows,
             include_distance_over_time=True,  # Generate distance plots (only with --use-timer)
             skip_initial=args.skip_initial,
-            cache_dir=args.cache_dir
+            cache_dir=args.cache_dir,
+            use_cache_if_exists=args.use_cache_if_exists
         )
 
         print("\n" + "=" * 60)
