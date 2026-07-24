@@ -2015,8 +2015,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
         # Generate heatmaps if requested
         if mode in ["heatmap", "all"]:
-            if use_timer and use_cache_if_exists and _cached_files(cache_bot_dir, "timer_*.csv"):
-                cached_timers = _cached_files(cache_bot_dir, "timer_*.csv")
+            # Check timer cache once
+            cached_timers = _cached_files(cache_bot_dir, "timer_*.csv") if (use_timer and use_cache_if_exists) else []
+
+            if use_timer and cached_timers:
                 print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} timer heatmaps from {len(cached_timers)} cached CSV(s) instead of reloading...")
                 for cache_path in cached_timers:
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
@@ -2103,8 +2105,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     if fig is not None:
                         plt.close(fig)
 
-            elif use_time_windows and use_cache_if_exists and _cached_files(cache_bot_dir, "window_*.csv"):
-                cached_windows = _cached_files(cache_bot_dir, "window_*.csv")
+            # Check time windows cache once
+            cached_windows = _cached_files(cache_bot_dir, "window_*.csv") if (use_time_windows and use_cache_if_exists) else []
+
+            if use_time_windows and cached_windows:
                 print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} time-window heatmaps from {len(cached_windows)} cached CSV(s) instead of reloading...")
                 for cache_path in cached_windows:
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
@@ -2167,8 +2171,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         print(f"  Saved to {output_path}")
                         plt.close(fig)
 
-            elif use_cache_if_exists and _cached_files(cache_bot_dir, "[0-2].csv"):
-                cached_phases = _cached_files(cache_bot_dir, "[0-2].csv")
+            # Check phase cache once
+            cached_phases = _cached_files(cache_bot_dir, "[0-2].csv") if use_cache_if_exists else []
+
+            if cached_phases:
                 print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} phase heatmaps from {len(cached_phases)} cached CSV(s) instead of reloading...")
                 for cache_path in cached_phases:
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
@@ -2278,8 +2284,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
         agg_df_combined = None
 
         if mode in ["heatmap", "all"]:
-            if use_timer and use_cache_if_exists and _cached_files(agg_cache_dir, "timer_*.csv"):
-                agg_cached_timers = _cached_files(agg_cache_dir, "timer_*.csv")
+            # Check aggregate timer cache once
+            agg_cached_timers = _cached_files(agg_cache_dir, "timer_*.csv") if (use_timer and use_cache_if_exists) else []
+
+            if use_timer and agg_cached_timers:
                 print(f"\n♻️  use_cache_if_exists=True: rendering pooled timer heatmaps from {len(agg_cached_timers)} cached CSV(s) instead of reloading...")
                 for cache_path in agg_cached_timers:
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
@@ -2351,8 +2359,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         if fig is not None:
                             plt.close(fig)
 
-            elif use_time_windows and use_cache_if_exists and _cached_files(agg_cache_dir, "window_*.csv"):
-                agg_cached_windows = _cached_files(agg_cache_dir, "window_*.csv")
+            # Check aggregate time windows cache once
+            agg_cached_windows = _cached_files(agg_cache_dir, "window_*.csv") if (use_time_windows and use_cache_if_exists) else []
+
+            if use_time_windows and agg_cached_windows:
                 print(f"\n♻️  use_cache_if_exists=True: rendering pooled time-window heatmaps from {len(agg_cached_windows)} cached CSV(s) instead of reloading...")
                 for cache_path in agg_cached_windows:
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
@@ -2391,8 +2401,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                             print(f"  Saved to {output_path}")
                             plt.close(fig)
 
-            elif use_cache_if_exists and _cached_files(agg_cache_dir, "[0-2].csv"):
-                agg_cached_phases = _cached_files(agg_cache_dir, "[0-2].csv")
+            # Check aggregate phase cache once
+            agg_cached_phases = _cached_files(agg_cache_dir, "[0-2].csv") if use_cache_if_exists else []
+
+            if agg_cached_phases:
                 print(f"\n♻️  use_cache_if_exists=True: rendering pooled phase heatmaps from {len(agg_cached_phases)} cached CSV(s) instead of reloading...")
                 for cache_path in agg_cached_phases:
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
