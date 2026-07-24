@@ -244,21 +244,53 @@ def plot_phase_heatmap(ax, phase_df, phase_name):
     ax.grid(True, alpha=0.3, zorder=0)
 
 
-def _write_cache_csv(df, cache_path):
-    """Write a small Polars DataFrame of chart-ready data to cache_path, creating parent dirs."""
+def _write_cache_csv(df, cache_path, max_samples=50000, use_parquet=True):
+    """
+    Write a small Polars DataFrame of chart-ready data to cache_path, creating parent dirs.
+    Downsamples to max_samples if the DataFrame is larger to keep cache files small and fast.
+
+    Args:
+        df: Polars DataFrame to cache
+        cache_path: Path to write the CSV cache
+        max_samples: Maximum number of samples to store (default: 50000)
+        use_parquet: Use Parquet format instead of CSV (much faster, default: True)
+    """
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    df.write_csv(cache_path)
+
+    # Downsample if needed to keep cache small and fast
+    if len(df) > max_samples:
+        # Random sample to max_samples
+        df = df.sample(n=max_samples, shuffle=True, seed=42)
+        print(f"    (downsampled {len(df):,} → {max_samples:,} samples for cache)")
+
+    # Use Parquet for much faster I/O (10-100x faster than CSV)
+    if use_parquet:
+        cache_path = cache_path.replace('.csv', '.parquet')
+        df.write_parquet(cache_path, compression='zstd')
+    else:
+        df.write_csv(cache_path)
 
 
 def _cached_files(cache_dir_path, pattern):
     """
-    Return sorted cache CSV paths matching pattern under cache_dir_path, or [] if the
-    directory doesn't exist. Purely an existence check - it does NOT verify the cache was
-    produced with the same skip_initial/actor_position/etc params as the current call.
+    Return sorted cache file paths (CSV or Parquet) matching pattern under cache_dir_path,
+    or [] if the directory doesn't exist. Prefers Parquet over CSV when both exist.
+    Purely an existence check - it does NOT verify the cache was produced with the same
+    skip_initial/actor_position/etc params as the current call.
     """
     if not cache_dir_path or not os.path.isdir(cache_dir_path):
         return []
-    return sorted(glob.glob(os.path.join(cache_dir_path, pattern)))
+
+    # Check for both CSV and Parquet files
+    csv_files = sorted(glob.glob(os.path.join(cache_dir_path, pattern)))
+    parquet_pattern = pattern.replace('.csv', '.parquet')
+    parquet_files = sorted(glob.glob(os.path.join(cache_dir_path, parquet_pattern)))
+
+    # Prefer Parquet over CSV (faster)
+    if parquet_files:
+        return parquet_files
+
+    return csv_files
 
 
 def plot_position_distribution(df_combined, bot_name, actor_position="both", cache_path=None):
@@ -365,13 +397,27 @@ def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", act
 
 def plot_joint_heatmap_from_cache(cache_path, phase_name, bot_name="", actor_position="both"):
     """
-    Redraw the joint heatmap (contour + marginal distributions) from a CSV previously
+    Redraw the joint heatmap (contour + marginal distributions) from a cached file previously
     written by plot_joint_heatmap_with_distributions(..., cache_path=...), skipping the
     expensive data load/filter step. The KDE itself is still recomputed here (cheap on the
     small cached array), so bin/bandwidth-independent design changes (title, labels,
     colors, colormap) can be iterated on quickly.
+
+    Supports both CSV and Parquet formats (Parquet is 10-100x faster).
     """
-    df = pl.read_csv(cache_path)
+    # Support both Parquet and CSV
+    if cache_path.endswith('.csv'):
+        # Check if Parquet version exists (faster)
+        parquet_path = cache_path.replace('.csv', '.parquet')
+        if os.path.exists(parquet_path):
+            cache_path = parquet_path
+
+    # Read cache file
+    if cache_path.endswith('.parquet'):
+        df = pl.read_parquet(cache_path)
+    else:
+        df = pl.read_csv(cache_path)
+
     if df.is_empty():
         return None
 
