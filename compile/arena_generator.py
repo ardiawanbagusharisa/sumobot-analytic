@@ -2003,9 +2003,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
     os.makedirs(output_dir, exist_ok=True)
 
     # Process each bot
-    for bot_name in ([] if bot_scope == "aggregate_only" else bot_names):
+    total_bots = 0 if bot_scope == "aggregate_only" else len(bot_names)
+    for bot_idx, bot_name in enumerate(([] if bot_scope == "aggregate_only" else bot_names), start=1):
         print("\n" + "=" * 60)
-        print(f"Processing {bot_name}")
+        print(f"Processing {bot_name} ({bot_idx}/{total_bots}) - {bot_idx/total_bots*100:.1f}% overall")
         print("=" * 60)
 
         # Create bot-specific directory
@@ -2020,9 +2021,11 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
             if use_timer and cached_timers:
                 print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} timer heatmaps from {len(cached_timers)} cached CSV(s) instead of reloading...")
-                for cache_path in cached_timers:
+                for cache_idx, cache_path in enumerate(cached_timers, start=1):
+                    print(f"  📊 Rendering timer {cache_idx}/{len(cached_timers)} from cache...", end='\r')
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
+                print(f"  ✅ Rendered {len(cached_timers)} timer heatmaps from cache" + " " * 20)
 
                 if include_distance_over_time:
                     for stem in ("distance_over_time", "distance_histogram", "distance_from_center_histogram"):
@@ -2033,7 +2036,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
             elif use_timer:
                 # Timer-based mode - load data with distance if needed
-                print("\nLoading data grouped by Timer...")
+                print("\n📥 Loading data grouped by Timer...")
                 if include_distance_over_time:
                     timer_data, distance_data = load_bot_data_from_simulation(
                         base_dir, bot_name, actor_position, chunksize, max_configs,
@@ -2110,14 +2113,18 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
             if use_time_windows and cached_windows:
                 print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} time-window heatmaps from {len(cached_windows)} cached CSV(s) instead of reloading...")
-                for cache_path in cached_windows:
+                for cache_idx, cache_path in enumerate(cached_windows, start=1):
+                    print(f"  📊 Rendering window {cache_idx}/{len(cached_windows)} from cache...", end='\r')
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
+                print(f"  ✅ Rendered {len(cached_windows)} time-window heatmaps from cache" + " " * 20)
 
             elif use_time_windows:
                 # Time window mode - fixed time windows [0-15s, 15-30s, 30-45s, 45-60s]
-                print("\nLoading all data for time window grouping...")
+                print("\n📥 Loading all data for time window grouping...")
                 df_combined = load_bot_data_from_simulation(base_dir, bot_name, actor_position, chunksize, max_configs, group_by_timer=False)
+                if not df_combined.is_empty():
+                    print(f"  ✅ Loaded {len(df_combined):,} position samples")
 
                 if df_combined.is_empty():
                     print(f"No data found for {bot_name}, skipping...")
@@ -2176,14 +2183,18 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
             if cached_phases:
                 print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} phase heatmaps from {len(cached_phases)} cached CSV(s) instead of reloading...")
-                for cache_path in cached_phases:
+                for cache_idx, cache_path in enumerate(cached_phases, start=1):
+                    print(f"  📊 Rendering phase {cache_idx}/{len(cached_phases)} from cache...", end='\r')
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
+                print(f"  ✅ Rendered {len(cached_phases)} phase heatmaps from cache" + " " * 20)
 
             else:
                 # Phase-based mode (original)
-                print("\nLoading all data...")
+                print("\n📥 Loading all data...")
                 df_combined = load_bot_data_from_simulation(base_dir, bot_name, actor_position, chunksize, max_configs, group_by_timer=False)
+                if not df_combined.is_empty():
+                    print(f"  ✅ Loaded {len(df_combined):,} position samples")
 
                 if df_combined.is_empty():
                     print(f"No data found for {bot_name}, skipping...")
@@ -2233,9 +2244,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             position_cache_path = os.path.join(cache_bot_dir, "position_distribution.csv") if cache_bot_dir else None
 
             if use_cache_if_exists and position_cache_path and os.path.exists(position_cache_path):
-                print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} position distribution from cached CSV instead of reloading...")
+                print(f"\n♻️  use_cache_if_exists=True: rendering {bot_name} position distribution from cached CSV...")
                 dist_path = os.path.join(bot_dir, "position_distribution.png")
                 _render_single_cached_chart(position_cache_path, bot_name, dist_path, actor_position)
+                print(f"  ✅ Rendered position distribution from cache")
             else:
                 # Load combined data if not already loaded (needed for position distribution).
                 # Also reload if df_combined never got set - e.g. the phase-mode heatmap
@@ -2288,10 +2300,12 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             agg_cached_timers = _cached_files(agg_cache_dir, "timer_*.csv") if (use_timer and use_cache_if_exists) else []
 
             if use_timer and agg_cached_timers:
-                print(f"\n♻️  use_cache_if_exists=True: rendering pooled timer heatmaps from {len(agg_cached_timers)} cached CSV(s) instead of reloading...")
-                for cache_path in agg_cached_timers:
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled timer heatmaps from {len(agg_cached_timers)} cached CSV(s)...")
+                for cache_idx, cache_path in enumerate(agg_cached_timers, start=1):
+                    print(f"  📊 Rendering aggregate timer {cache_idx}/{len(agg_cached_timers)} from cache...", end='\r')
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
+                print(f"  ✅ Rendered {len(agg_cached_timers)} aggregate timer heatmaps from cache" + " " * 20)
 
                 if include_distance_over_time:
                     for stem in ("distance_over_time", "distance_histogram", "distance_from_center_histogram"):
@@ -2301,7 +2315,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                             _render_single_cached_chart(cp, agg_label, output_path, actor_position)
 
             elif use_timer:
-                print("\nLoading pooled data grouped by Timer...")
+                print("\n📥 Loading pooled data grouped by Timer (all bots)...")
                 if include_distance_over_time:
                     agg_timer_data, agg_distance_data = load_all_bots_data_from_simulation(
                         base_dir, chunksize, max_configs, group_by_timer=True,
@@ -2363,13 +2377,15 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             agg_cached_windows = _cached_files(agg_cache_dir, "window_*.csv") if (use_time_windows and use_cache_if_exists) else []
 
             if use_time_windows and agg_cached_windows:
-                print(f"\n♻️  use_cache_if_exists=True: rendering pooled time-window heatmaps from {len(agg_cached_windows)} cached CSV(s) instead of reloading...")
-                for cache_path in agg_cached_windows:
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled time-window heatmaps from {len(agg_cached_windows)} cached CSV(s)...")
+                for cache_idx, cache_path in enumerate(agg_cached_windows, start=1):
+                    print(f"  📊 Rendering aggregate window {cache_idx}/{len(agg_cached_windows)} from cache...", end='\r')
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
+                print(f"  ✅ Rendered {len(agg_cached_windows)} aggregate time-window heatmaps from cache" + " " * 20)
 
             elif use_time_windows:
-                print("\nLoading pooled data for time window grouping...")
+                print("\n📥 Loading pooled data for time window grouping (all bots)...")
                 agg_df_combined = load_all_bots_data_from_simulation(
                     base_dir, chunksize, max_configs, group_by_timer=False,
                     input_format=input_format, filter_matchups=filter_matchups
@@ -2405,13 +2421,15 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             agg_cached_phases = _cached_files(agg_cache_dir, "[0-2].csv") if use_cache_if_exists else []
 
             if agg_cached_phases:
-                print(f"\n♻️  use_cache_if_exists=True: rendering pooled phase heatmaps from {len(agg_cached_phases)} cached CSV(s) instead of reloading...")
-                for cache_path in agg_cached_phases:
+                print(f"\n♻️  use_cache_if_exists=True: rendering pooled phase heatmaps from {len(agg_cached_phases)} cached CSV(s)...")
+                for cache_idx, cache_path in enumerate(agg_cached_phases, start=1):
+                    print(f"  📊 Rendering aggregate phase {cache_idx}/{len(agg_cached_phases)} from cache...", end='\r')
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
+                print(f"  ✅ Rendered {len(agg_cached_phases)} aggregate phase heatmaps from cache" + " " * 20)
 
             else:
-                print("\nLoading pooled data...")
+                print("\n📥 Loading pooled data (all bots)...")
                 agg_df_combined = load_all_bots_data_from_simulation(
                     base_dir, chunksize, max_configs, group_by_timer=False,
                     input_format=input_format, filter_matchups=filter_matchups
@@ -2486,12 +2504,14 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             required_distance_dist_caches.append(os.path.join(cache_dir, "All_Bots_Combined", "distance_distribution.csv"))
 
     if use_cache_if_exists and required_distance_dist_caches and all(os.path.exists(p) for p in required_distance_dist_caches):
-        print(f"\n♻️  use_cache_if_exists=True: rendering {len(required_distance_dist_caches)} distance_distribution chart(s) from cache instead of reloading...")
-        for cache_path in required_distance_dist_caches:
+        print(f"\n♻️  use_cache_if_exists=True: rendering {len(required_distance_dist_caches)} distance_distribution chart(s) from cache...")
+        for cache_idx, cache_path in enumerate(required_distance_dist_caches, start=1):
+            print(f"  📊 Rendering distance distribution {cache_idx}/{len(required_distance_dist_caches)} from cache...", end='\r')
             cached_bot_name = os.path.basename(os.path.dirname(cache_path))
             name = "All Bots" if cached_bot_name == "All_Bots_Combined" else cached_bot_name
             output_path = os.path.join(output_dir, cached_bot_name, "distance_distribution.png")
             _render_single_cached_chart(cache_path, name, output_path, actor_position)
+        print(f"  ✅ Rendered {len(required_distance_dist_caches)} distance distributions from cache" + " " * 20)
 
     else:
         # Collect data per bot (across all matchups)
@@ -2561,10 +2581,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             bot_distance_data[bot2_name]["from_center"].append(bot2_center_dist)
 
         # Create distance distribution plot for each bot
-        for bot_name, data in ({} if bot_scope == "aggregate_only" else bot_distance_data).items():
-            print("\n" + "=" * 60)
-            print(f"Creating distance distribution for {bot_name}...")
-            print("=" * 60)
+        bot_dist_list = list(({} if bot_scope == "aggregate_only" else bot_distance_data).items())
+        total_bot_dists = len(bot_dist_list)
+        for bot_dist_idx, (bot_name, data) in enumerate(bot_dist_list, start=1):
+            print(f"\n  📊 Creating distance distribution for {bot_name} ({bot_dist_idx}/{total_bot_dists})...")
 
             # Concatenate all data for this bot
             combined_between = pl.concat(data["between"])
@@ -2583,9 +2603,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
 
         # Create pooled distance distribution across all bots
         if bot_scope != "per_bot_only" and all_between_distances and bot_distance_data:
-            print("\n" + "=" * 60)
-            print("Creating pooled distance distribution for All Bots...")
-            print("=" * 60)
+            print(f"\n  📊 Creating pooled distance distribution for All Bots Combined...")
 
             combined_between = pl.concat(all_between_distances)
             combined_from_center = pl.concat([
@@ -2603,7 +2621,12 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                 plt.close(fig)
 
     print("\n" + "=" * 60)
-    print(f"✅ Completed! All visualizations saved to: {output_dir}")
+    print(f"✅ COMPLETED! All visualizations saved to: {output_dir}")
+    print("=" * 60)
+    if bot_scope != "aggregate_only":
+        print(f"  📊 Processed {total_bots} bots")
+    if bot_scope != "per_bot_only":
+        print(f"  📊 Generated aggregate 'All Bots Combined' charts")
     print("=" * 60)
 
 
