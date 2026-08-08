@@ -1439,6 +1439,15 @@ def plot_pacing_factors_per_bot_summary(
 
     # First pass: Calculate overall_avg for each bot
     bot_overall_avg = {}
+    # Overall_Min/Overall_Max: the actual lowest/highest pace each bot hit across its
+    # own games, not the min/max of an already-averaged Overall_Avg across bots (that's
+    # "which bot's average was highest/lowest", a different question). Built the same
+    # way Overall_Avg combines each factor's *_mean into a Tempo/Threat/Average curve,
+    # but from *_min/*_max (each already a robust low/high-5%-tail average per TimeBin
+    # across that bot's games - see generate_timebins_from_batches) - so the min/max
+    # taken across TimeBins here is the trough/peak of that bot's pacing over a match.
+    bot_overall_min = {}
+    bot_overall_max = {}
 
     for bot in df['Bot'].unique():
         bot_df = df[df['Bot'] == bot].copy()
@@ -1452,43 +1461,81 @@ def plot_pacing_factors_per_bot_summary(
 
         # Calculate Tempo: average of tempo factors
         tempo_values = []
+        tempo_min_values = []
+        tempo_max_values = []
         for factor in tempo_factors:
             mean_col = f'{factor}_mean'
             if mean_col in bot_df.columns:
                 tempo_values.append(bot_df[mean_col].values)
+            min_col = f'{factor}_min'
+            if min_col in bot_df.columns:
+                tempo_min_values.append(bot_df[min_col].values)
+            max_col = f'{factor}_max'
+            if max_col in bot_df.columns:
+                tempo_max_values.append(bot_df[max_col].values)
 
         # Use nanmean to ignore NaN values (matches C# behavior of skipping NaN in averaging)
         tempo = np.nanmean(tempo_values, axis=0) if tempo_values else np.zeros(len(bot_df))
+        tempo_min = np.nanmean(tempo_min_values, axis=0) if tempo_min_values else np.zeros(len(bot_df))
+        tempo_max = np.nanmean(tempo_max_values, axis=0) if tempo_max_values else np.zeros(len(bot_df))
 
         # Calculate Threat: average of threat factors
         threat_values = []
+        threat_min_values = []
+        threat_max_values = []
         for factor in threat_factors:
             mean_col = f'{factor}_mean'
             if mean_col in bot_df.columns:
                 threat_values.append(bot_df[mean_col].values)
+            min_col = f'{factor}_min'
+            if min_col in bot_df.columns:
+                threat_min_values.append(bot_df[min_col].values)
+            max_col = f'{factor}_max'
+            if max_col in bot_df.columns:
+                threat_max_values.append(bot_df[max_col].values)
 
         # Use nanmean to ignore NaN values (matches C# behavior of skipping NaN in averaging)
         threat = np.nanmean(threat_values, axis=0) if threat_values else np.zeros(len(bot_df))
+        threat_min = np.nanmean(threat_min_values, axis=0) if threat_min_values else np.zeros(len(bot_df))
+        threat_max = np.nanmean(threat_max_values, axis=0) if threat_max_values else np.zeros(len(bot_df))
 
         # Apply normalization if enabled
         if normalize_values:
             tempo_final = normalize(tempo)
             threat_final = normalize(threat)
+            tempo_min_final = normalize(tempo_min)
+            threat_min_final = normalize(threat_min)
+            tempo_max_final = normalize(tempo_max)
+            threat_max_final = normalize(threat_max)
         else:
             tempo_final = tempo
             threat_final = threat
+            tempo_min_final = tempo_min
+            threat_min_final = threat_min
+            tempo_max_final = tempo_max
+            threat_max_final = threat_max
 
         # Calculate Average
         average_final = (tempo_final + threat_final) / 2
+        average_min_final = (tempo_min_final + threat_min_final) / 2
+        average_max_final = (tempo_max_final + threat_max_final) / 2
 
-        # Calculate overall average (use nanmean to handle NaN values)
+        # Calculate overall average/min/max (use nanmean/nanmin/nanmax to handle NaN values)
         overall_avg = np.nanmean(average_final)
+        overall_min = np.nanmin(average_min_final) if average_min_final.size else 0.0
+        overall_max = np.nanmax(average_max_final) if average_max_final.size else 0.0
 
         # If still NaN (all values were NaN), set to 0
         if np.isnan(overall_avg):
             overall_avg = 0.0
+        if np.isnan(overall_min):
+            overall_min = 0.0
+        if np.isnan(overall_max):
+            overall_max = 0.0
 
         bot_overall_avg[bot] = overall_avg
+        bot_overall_min[bot] = overall_min
+        bot_overall_max[bot] = overall_max
 
     # Sort bots by overall_avg (descending - highest pacing first)
     bots = sorted(bot_overall_avg.keys(), key=lambda b: bot_overall_avg[b], reverse=True)
@@ -1507,7 +1554,9 @@ def plot_pacing_factors_per_bot_summary(
         summary_data.append({
             'Rank': display_rank,
             'Bot': bot,
-            'Overall_Avg': bot_overall_avg[bot]
+            'Overall_Avg': bot_overall_avg[bot],
+            'Overall_Min': bot_overall_min[bot],
+            'Overall_Max': bot_overall_max[bot]
         })
     summary_df = pd.DataFrame(summary_data)
 
@@ -1631,7 +1680,9 @@ def plot_pacing_factors_per_bot_summary(
             bot_row = {
                 'Rank': row['Rank'],
                 'Bot': bot_name,
-                'Overall_Avg': round(row['Overall_Avg'], 3)
+                'Overall_Avg': round(row['Overall_Avg'], 3),
+                'Overall_Min': round(row['Overall_Min'], 3),
+                'Overall_Max': round(row['Overall_Max'], 3)
             }
 
             # Add all factor details as columns
