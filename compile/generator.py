@@ -1115,16 +1115,18 @@ def batch_process_pacing_segments(base_dir, batch_size=10, checkpoint_dir="batch
             the ceiling and should normalize to 1.0. Only used when that config
             folder's own metadata.json doesn't have "PacingMin"/"PacingMax" keys.
 
-    TargetTempo/TargetThreat/TargetOverallPacing are already raw values in [0, 1]
-    (the engine's runtime lerp put them there directly) - they need no transform.
-    Actual Tempo/Threat/OverallPacing are raw composite scores bounded by
-    [MinPacing, MaxPacing], not [0, 1] - each row is tagged with "PacingMinUsed"/
-    "PacingMaxUsed" plus "ActualTempoScaled"/"ActualThreatScaled"/
-    "ActualOverallPacingScaled": the actual columns min-max normalized into [0, 1]
-    via (value - MinPacing) / (MaxPacing - MinPacing), then capped to [0, 1] to guard
-    against values that slip past the calibrated bounds - directly comparable to the
-    (untouched) TargetTempo/TargetThreat/TargetOverallPacing columns on the same 0-1
-    scale.
+    TargetTempo/TargetThreat/TargetOverallPacing are logged raw, bounded by the same
+    [MinPacing, MaxPacing] window as the Actual columns (e.g. a "target high" curve
+    tops out at MaxPacing, not 1.0) - NOT already-normalized [0, 1] values, so they
+    need the same min-max rescale as Actual before the two can be compared. Each row
+    is tagged with "PacingMinUsed"/"PacingMaxUsed" plus "ActualTempoScaled"/
+    "ActualThreatScaled"/"ActualOverallPacingScaled" AND "TargetTempoScaled"/
+    "TargetThreatScaled"/"TargetOverallPacingScaled": both sides min-max normalized
+    into [0, 1] via (value - MinPacing) / (MaxPacing - MinPacing), then clipped to
+    [0, 1] to guard against values that slip past the calibrated bounds - putting
+    the two on the same comparable 0-1 scale instead of leaving Target in raw units
+    (which would make a target sitting at/near MinPacing look "capped" near the
+    floor rather than correctly rescaling down toward 0).
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -1228,17 +1230,20 @@ def batch_process_pacing_segments(base_dir, batch_size=10, checkpoint_dir="batch
                 pl.lit(resolved_min_pacing).alias("PacingMinUsed"),
                 pl.lit(resolved_max_pacing).alias("PacingMaxUsed"),
             ])
-            # TargetTempo/TargetThreat/TargetOverallPacing are already raw values in
-            # [0, 1] (the engine's runtime lerp put them there directly) - they need
-            # no transform. Actual Tempo/Threat/OverallPacing are raw composite
-            # scores bounded by [MinPacing, MaxPacing] (e.g. MaxPacing=0.6 means an
-            # OverallPacing of 0.6 is the ceiling) - min-max normalize them into
-            # [0, 1] and cap, to keep them directly comparable to the Target* columns
-            # on the same 0-1 scale.
+            # Both Actual and Target Tempo/Threat/OverallPacing are raw composite
+            # scores bounded by [MinPacing, MaxPacing] (e.g. MaxPacing=0.6 means a
+            # value of 0.6 is the ceiling) - min-max normalize (rescale) *both* into
+            # [0, 1] and clip only to guard against values slipping past the
+            # calibrated bounds, so they land on the same comparable 0-1 scale. A
+            # target sitting at/near MinPacing must be rescaled toward 0, not left
+            # in raw units where it would look "capped" at the floor instead.
             df = df.with_columns([
                 ((pl.col("Tempo") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("ActualTempoScaled"),
                 ((pl.col("Threat") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("ActualThreatScaled"),
                 ((pl.col("OverallPacing") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("ActualOverallPacingScaled"),
+                ((pl.col("TargetTempo") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("TargetTempoScaled"),
+                ((pl.col("TargetThreat") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("TargetThreatScaled"),
+                ((pl.col("TargetOverallPacing") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("TargetOverallPacingScaled"),
             ])
 
             if applied_bots:
