@@ -17,6 +17,8 @@ import pandas as pd  # For pd.cut in time bins
 import json
 from pathlib import Path
 
+from compile.log_to_parquet import parse_pacing_folder_name
+
 # Check if GPU support is available
 GPU_AVAILABLE = False
 try:
@@ -873,6 +875,29 @@ def process_single_csv_lazy(lf, bot_a, bot_b, timer, act_interval, round_val, sk
     return final_metrics
 
 
+def _find_main_log_files(config_path, input_format):
+    """
+    Find the per-config log file(s) (game_*.json converted via
+    compile.log_to_parquet.convert_all_configs) in a config folder, honoring
+    input_format ("csv"/"parquet"/"auto" - auto prefers parquet, falling back to
+    csv). Excludes "*_pacing.parquet" - a legacy filename from before event rows and
+    PacingSegment rows were merged into one file (discriminated by "Category"); any
+    leftover file with that suffix predates the merge and has a different schema (no
+    "Category"/"Actor"/etc. event columns), so it would break a bare "*.parquet" glob.
+    """
+    if input_format == "csv":
+        return glob.glob(os.path.join(config_path, "*.csv"))
+    parquet_files = [
+        f for f in glob.glob(os.path.join(config_path, "*.parquet"))
+        if not f.endswith("_pacing.parquet")
+    ]
+    if input_format == "parquet":
+        return parquet_files
+    # auto - prefer parquet, fallback to csv
+    csv_files = glob.glob(os.path.join(config_path, "*.csv"))
+    return parquet_files if parquet_files else csv_files
+
+
 def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, bot_option="all", input_format="csv", skip_initial=0.0, config_filter=None, collision_window_n=1, name=None):
     """
     Process pacing factors in batches with bot filtering option
@@ -924,18 +949,7 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
 
         for config_folder in config_folders:
             config_path = os.path.join(matchup_path, config_folder)
-
-            # Collect files based on input format
-            if input_format == "csv":
-                files = glob.glob(os.path.join(config_path, "*.csv"))
-            elif input_format == "parquet":
-                files = glob.glob(os.path.join(config_path, "*.parquet"))
-            else:  # auto - prefer parquet, fallback to csv
-                parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
-                csv_files = glob.glob(os.path.join(config_path, "*.csv"))
-                files = parquet_files if parquet_files else csv_files
-
-            all_files.extend(files)
+            all_files.extend(_find_main_log_files(config_path, input_format))
 
     file_type = "Parquet" if input_format == "parquet" else "CSV/Parquet" if input_format == "auto" else "CSV"
     bot_filter_msg = f"for bot '{bot_option}'" if bot_option != "all" else "for all bots"
@@ -1038,6 +1052,257 @@ def batch_process_pacing(base_dir, batch_size=50, checkpoint_dir="batched", time
                 print(f"Saved pacing factors batch: {pacing_path} ({len(pacing_factors_df)} records)")
 
 
+# Fallback calibration constants for logs predating metadata.json's PacingMin/PacingMax
+# fields. Confirmed against Assets/Scenes/Battle.unity for the 20260803_235204_batch
+# batch specifically - do not assume these hold for other batches; pass min_pacing/
+# max_pacing explicitly to batch_process_pacing_segments instead.
+DEFAULT_MIN_PACING = 0.0
+DEFAULT_MAX_PACING = 0.474
+
+
+def get_pacing_calibration(metadata: dict, min_pacing: float = None, max_pacing: float = None):
+    """
+    Resolve the (MinPacing, MaxPacing) constants a battle's raw Tempo/Threat/
+    OverallPacing composite scores were bounded by at runtime (e.g. a simulation run
+    with MaxPacing=0.6 means an OverallPacing of 0.6 is the ceiling, i.e. should
+    normalize to 1.0), used to min-max normalize the Actual columns into [0, 1].
+
+    Precedence: metadata.json's "PacingMin"/"PacingMax" keys (new logs) > the
+    min_pacing/max_pacing arguments (needed for logs predating that field) > the
+    module defaults (only valid for the specific old batch they were reverse-
+    engineered from).
+    """
+    resolved_min = metadata.get("PacingMin", min_pacing if min_pacing is not None else DEFAULT_MIN_PACING)
+    resolved_max = metadata.get("PacingMax", max_pacing if max_pacing is not None else DEFAULT_MAX_PACING)
+    return resolved_min, resolved_max
+
+
+def batch_process_pacing_segments(base_dir, batch_size=10, checkpoint_dir="batched", config_filter=None, name=None, applied_bots=None, min_pacing=None, max_pacing=None):
+    """
+    Gather the dynamic-pacing PacingSegment rows (Category == "PacingSegment", produced
+    per config folder alongside the event rows by
+    compile.log_to_parquet.convert_logs_to_parquet) into batched checkpoint files,
+    tagged with matchup/config/PacingTarget/PacingConstraint so it can be visualized
+    per target - to check whether the action filter's actual pacing (OverallPacing)
+    tracks the predefined target curve (TargetOverallPacing) over a round.
+
+    Structure expected: base_dir/BotA_vs_BotB/ConfigFolder/*.parquet (the same combined
+    parquet batch_process_csvs reads - PacingSegment rows are filtered out of it here)
+
+    Args:
+        base_dir: Root of converted parquet files (the output_root passed to
+            convert_all_configs)
+        batch_size: Number of config folders per batch
+        checkpoint_dir: Directory to save checkpoints
+        config_filter: Dict to filter configs, same shape as batch_process_pacing's
+            config_filter (Timer/ActInterval/Round/SkillLeft/SkillRight), plus optional
+            "PacingTarget" / "PacingConstraint" keys (each a list of allowed values)
+        name: Optional name for organizing output in a subfolder (default: None)
+              If provided, output structure: checkpoint_dir/{name}/pacing_segments/
+        applied_bots: Optional list of bot names that had the dynamic pacing filter
+            applied to them (e.g. ["Bot_MCTS", "Bot_NN"]). The filter is tied to bot
+            identity, not to a fixed Left/Right slot, so matchup folders are logged in
+            both directions (BotA_vs_BotB and BotB_vs_BotA) with the applied bot
+            switching sides. When provided, each row is tagged with:
+              - "Bot": the actual bot name occupying that row's Side
+              - "OpponentBot": the bot on the other side
+              - "PacingRole": "Applied" if Bot is in applied_bots, else "Opponent"
+            so downstream analysis/plots can group by the applied-bot's perspective
+            instead of raw screen Side.
+        min_pacing, max_pacing: Fallback calibration constants (see
+            get_pacing_calibration) - the (MinPacing, MaxPacing) bounds the actual
+            run used, e.g. a run with MaxPacing=0.6 means an OverallPacing of 0.6 was
+            the ceiling and should normalize to 1.0. Only used when that config
+            folder's own metadata.json doesn't have "PacingMin"/"PacingMax" keys.
+
+    TargetTempo/TargetThreat/TargetOverallPacing are logged raw, bounded by the same
+    [MinPacing, MaxPacing] window as the Actual columns (e.g. a "target high" curve
+    tops out at MaxPacing, not 1.0) - NOT already-normalized [0, 1] values, so they
+    need the same min-max rescale as Actual before the two can be compared. Each row
+    is tagged with "PacingMinUsed"/"PacingMaxUsed" plus "ActualTempoScaled"/
+    "ActualThreatScaled"/"ActualOverallPacingScaled" AND "TargetTempoScaled"/
+    "TargetThreatScaled"/"TargetOverallPacingScaled": both sides min-max normalized
+    into [0, 1] via (value - MinPacing) / (MaxPacing - MinPacing), then clipped to
+    [0, 1] to guard against values that slip past the calibrated bounds - putting
+    the two on the same comparable 0-1 scale instead of leaving Target in raw units
+    (which would make a target sitting at/near MinPacing look "capped" near the
+    floor rather than correctly rescaling down toward 0).
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    pacing_segments_dir = os.path.join(checkpoint_dir, name, "pacing_segments") if name else os.path.join(checkpoint_dir, "pacing_segments")
+    os.makedirs(pacing_segments_dir, exist_ok=True)
+
+    # Find all per-config pacing parquet files, grouped by matchup/config folder
+    all_config_entries = []
+    matchup_folders = [f for f in os.listdir(base_dir)
+                       if os.path.isdir(os.path.join(base_dir, f))]
+
+    for matchup_folder in matchup_folders:
+        match = re.match(r"(.+)_vs_(.+)", matchup_folder)
+        if not match:
+            continue
+        bot_a, bot_b = match.groups()
+
+        matchup_path = os.path.join(base_dir, matchup_folder)
+        config_folders = [f for f in os.listdir(matchup_path)
+                         if os.path.isdir(os.path.join(matchup_path, f))]
+
+        for config_folder in config_folders:
+            config_path = os.path.join(matchup_path, config_folder)
+            main_files = _find_main_log_files(config_path, "parquet")
+            if not main_files:
+                continue
+            all_config_entries.append((bot_a, bot_b, config_folder, main_files[0]))
+
+    print(f"Found {len(all_config_entries)} config folders with pacing segment data")
+
+    # Determine which batches are already processed
+    processed_batches = set()
+    for f in os.listdir(pacing_segments_dir):
+        match = re.match(r"batch_(\d+)\.parquet", f)
+        if match:
+            processed_batches.add(int(match.group(1)))
+
+    total_batches = (len(all_config_entries) + batch_size - 1) // batch_size
+
+    for batch_idx in range(total_batches):
+        batch_num = batch_idx + 1
+
+        if batch_num in processed_batches:
+            print(f"Skipping pacing segments batch {batch_num}/{total_batches} (already processed)")
+            continue
+
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(all_config_entries))
+        batch_items = all_config_entries[start_idx:end_idx]
+
+        print(f"\nProcessing pacing segments batch {batch_num}/{total_batches} ({len(batch_items)} configs)...")
+
+        fragment_list = []
+        for bot_a, bot_b, config_folder, pacing_path in batch_items:
+            config = parse_config_name_cached(config_folder)
+            pacing_target, pacing_constraint = parse_pacing_folder_name(config_folder)
+
+            if config_filter is not None:
+                skip_file = False
+                for key, allowed_values in config_filter.items():
+                    if key == "PacingTarget":
+                        check_value = pacing_target
+                    elif key == "PacingConstraint":
+                        check_value = pacing_constraint
+                    else:
+                        check_value = config.get(key)
+                    if check_value not in allowed_values:
+                        skip_file = True
+                        break
+                if skip_file:
+                    continue
+
+            # The main per-config parquet holds both event rows and PacingSegment rows
+            # (see compile.log_to_parquet.convert_logs_to_parquet) - keep only the latter.
+            df = pl.read_parquet(pacing_path).filter(pl.col("Category") == "PacingSegment")
+            if df.is_empty():
+                continue
+
+            df = df.with_columns([
+                pl.lit(bot_a).alias("Bot_L"),
+                pl.lit(bot_b).alias("Bot_R"),
+                pl.lit(config.get("Timer")).alias("Timer"),
+                pl.lit(config.get("ActInterval")).alias("ActInterval"),
+                pl.lit(config.get("Round")).alias("Round"),
+                pl.lit(config.get("SkillLeft")).alias("SkillLeft"),
+                pl.lit(config.get("SkillRight")).alias("SkillRight"),
+                pl.lit(pacing_target).alias("PacingTarget"),
+                pl.lit(pacing_constraint).alias("PacingConstraint"),
+                pl.lit(config_folder).alias("ConfigFolder"),
+            ])
+
+            metadata = {}
+            metadata_path = os.path.join(os.path.dirname(pacing_path), "metadata.json")
+            if os.path.isfile(metadata_path):
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+            resolved_min_pacing, resolved_max_pacing = get_pacing_calibration(metadata, min_pacing, max_pacing)
+            pacing_span = resolved_max_pacing - resolved_min_pacing
+
+            df = df.with_columns([
+                pl.lit(resolved_min_pacing).alias("PacingMinUsed"),
+                pl.lit(resolved_max_pacing).alias("PacingMaxUsed"),
+            ])
+            # Both Actual and Target Tempo/Threat/OverallPacing are raw composite
+            # scores bounded by [MinPacing, MaxPacing] (e.g. MaxPacing=0.6 means a
+            # value of 0.6 is the ceiling) - min-max normalize (rescale) *both* into
+            # [0, 1] and clip only to guard against values slipping past the
+            # calibrated bounds, so they land on the same comparable 0-1 scale. A
+            # target sitting at/near MinPacing must be rescaled toward 0, not left
+            # in raw units where it would look "capped" at the floor instead.
+            df = df.with_columns([
+                ((pl.col("Tempo") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("ActualTempoScaled"),
+                ((pl.col("Threat") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("ActualThreatScaled"),
+                ((pl.col("OverallPacing") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("ActualOverallPacingScaled"),
+                ((pl.col("TargetTempo") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("TargetTempoScaled"),
+                ((pl.col("TargetThreat") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("TargetThreatScaled"),
+                ((pl.col("TargetOverallPacing") - resolved_min_pacing) / pacing_span).clip(0.0, 1.0).alias("TargetOverallPacingScaled"),
+            ])
+
+            if applied_bots:
+                df = df.with_columns([
+                    pl.when(pl.col("Side") == "Left").then(pl.col("Bot_L")).otherwise(pl.col("Bot_R")).alias("Bot"),
+                    pl.when(pl.col("Side") == "Left").then(pl.col("Bot_R")).otherwise(pl.col("Bot_L")).alias("OpponentBot"),
+                ])
+                df = df.with_columns(
+                    pl.when(pl.col("Bot").is_in(applied_bots))
+                    .then(pl.lit("Applied"))
+                    .otherwise(pl.lit("Opponent"))
+                    .alias("PacingRole")
+                )
+
+            fragment_list.append(df)
+
+        if fragment_list:
+            batch_df = pl.concat(fragment_list, how="diagonal_relaxed")
+            batch_path = os.path.join(pacing_segments_dir, f"batch_{batch_num:02d}.parquet")
+            batch_df.write_parquet(batch_path, compression="zstd", compression_level=3)
+            print(f"Saved pacing segments batch: {batch_path} ({len(batch_df)} records)")
+
+
+def generate_pacing_segments_from_batches(checkpoint_dir, output_dir, name=None):
+    """
+    Concatenate batched pacing-segment checkpoints (from batch_process_pacing_segments)
+    into one combined Parquet file, ready to be grouped by PacingTarget for visualization.
+
+    Args:
+        checkpoint_dir: Directory containing batch checkpoints (same as passed to
+            batch_process_pacing_segments)
+        output_dir: Directory to save the final summary Parquet file
+        name: Optional name matching the one used in batch_process_pacing_segments
+
+    Returns:
+        The combined Polars DataFrame (or None if no batches were found)
+    """
+    pacing_segments_dir = os.path.join(checkpoint_dir, name, "pacing_segments") if name else os.path.join(checkpoint_dir, "pacing_segments")
+    batch_files = sorted(glob.glob(os.path.join(pacing_segments_dir, "batch_*.parquet")))
+
+    if not batch_files:
+        print(f"No pacing segment batches found in {pacing_segments_dir}")
+        return None
+
+    print(f"\n📂 Loading {len(batch_files)} pacing segment batch files...")
+    lazy_frames = [pl.scan_parquet(f) for f in batch_files]
+    combined_df = collect_with_gpu(pl.concat(lazy_frames, how="diagonal_relaxed"))
+    print(f"Loaded {len(combined_df):,} pacing segment records")
+
+    pacing_output_dir = os.path.join(output_dir, name) if name else output_dir
+    os.makedirs(pacing_output_dir, exist_ok=True)
+
+    output_path = os.path.join(pacing_output_dir, "summary_pacing_segments.parquet")
+    combined_df.write_parquet(output_path, compression="zstd", compression_level=3)
+    print(f"✅ Saved: {output_path} ({len(combined_df):,} rows)")
+
+    return combined_df
+
+
 def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, compute_pacing=False, input_format="csv"):
     """
     Process CSVs or Parquet files in batches and save checkpoints
@@ -1079,18 +1344,7 @@ def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_b
 
         for config_folder in config_folders:
             config_path = os.path.join(matchup_path, config_folder)
-
-            # Collect files based on input format
-            if input_format == "csv":
-                files = glob.glob(os.path.join(config_path, "*.csv"))
-            elif input_format == "parquet":
-                files = glob.glob(os.path.join(config_path, "*.parquet"))
-            else:  # auto - prefer parquet, fallback to csv
-                parquet_files = glob.glob(os.path.join(config_path, "*.parquet"))
-                csv_files = glob.glob(os.path.join(config_path, "*.csv"))
-                files = parquet_files if parquet_files else csv_files
-
-            all_files.extend(files)
+            all_files.extend(_find_main_log_files(config_path, input_format))
 
     file_type = "Parquet" if input_format == "parquet" else "CSV/Parquet" if input_format == "auto" else "CSV"
     print(f"Found {len(all_files)} {file_type} files to process")
