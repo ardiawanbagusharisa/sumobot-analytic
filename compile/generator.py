@@ -1303,6 +1303,126 @@ def generate_pacing_segments_from_batches(checkpoint_dir, output_dir, name=None)
     return combined_df
 
 
+# The 8 Threat/Tempo factors batch_process_pacing computes per (GameIndex,
+# RoundIndex, TimeBin, Actor) - see process_pacing_factors_timebins_single_csv.
+PACING_FACTOR_NAMES = [
+    "CollisionRatio", "AbilityRatio", "Angle", "SafeDistance",
+    "ActionIntensity", "ActionDensity", "BotsDistance", "Velocity",
+]
+
+
+def load_bot_pacing_factors(checkpoint_dir, name, target_bot, time_bin_size=1, group_label=None, canonical_bot=None):
+    """
+    Load batch_process_pacing's per-bot batch CSVs (checkpoint_dir/name/
+    pacing_factors_{bin}/batch_*.csv) and fold the _L/_R-suffixed factor columns
+    down to target_bot's own side, regardless of which slot (Bot_L or Bot_R) it
+    occupied in a given matchup folder - unlike batch_process_pacing_segments's
+    PacingSegment rows, these raw factors are recomputed offline from the same
+    Action/Collision/position event rows every run logs, so they're the one pacing
+    metric that exists whether or not the dynamic pacing filter was active - useful
+    for comparing a filter-steered ("Applied") run against an unfiltered baseline
+    run of the same bot, which never emits PacingSegment rows at all.
+
+    Args:
+        checkpoint_dir, name: Same checkpoint_dir/name passed to batch_process_pacing
+        target_bot: Bot name to extract (must match the value batch_process_pacing's
+            bot_option filtered on, e.g. "MCTS" or "Bot_MCTS")
+        time_bin_size: Bin size used when calling batch_process_pacing (selects which
+            pacing_factors_{bin} subfolder to read)
+        group_label: Optional value stamped into a "Group" column (e.g. "Filtered")
+        canonical_bot: Optional display name to stamp into "Bot" instead of
+            target_bot, so differently-prefixed runs of the same bot (e.g. "MCTS" vs
+            "Bot_MCTS") can be aligned under one name
+
+    Returns:
+        Polars DataFrame with columns GameIndex, RoundIndex, Timer, ActInterval,
+        Round, SkillLeft, SkillRight, TimeBin, OpponentBot, Bot, Group, plus one
+        column per PACING_FACTOR_NAMES entry - or None if no batch files were found.
+    """
+    bin_size_str = str(time_bin_size).replace(".", "_")
+    pattern = os.path.join(checkpoint_dir, name, f"pacing_factors_{bin_size_str}", "batch_*.csv")
+    batch_files = sorted(glob.glob(pattern))
+    if not batch_files:
+        print(f"No pacing factor batches found matching {pattern}")
+        return None
+
+    df = pl.concat([pl.scan_csv(f) for f in batch_files], how="diagonal_relaxed").collect()
+
+    is_left = pl.col("Bot_L") == target_bot
+    factor_exprs = [
+        pl.when(is_left).then(pl.col(f"{factor}_L")).otherwise(pl.col(f"{factor}_R")).alias(factor)
+        for factor in PACING_FACTOR_NAMES
+    ]
+    return df.select([
+        "GameIndex", "RoundIndex", "Timer", "ActInterval", "Round", "SkillLeft", "SkillRight", "TimeBin",
+        pl.when(is_left).then(pl.col("Bot_R")).otherwise(pl.col("Bot_L")).alias("OpponentBot"),
+        *factor_exprs,
+    ]).with_columns([
+        pl.lit(canonical_bot or target_bot).alias("Bot"),
+        pl.lit(group_label).alias("Group"),
+    ])
+
+
+def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None):
+    """
+    Load the engine's own PacingSegment rows (batch_process_pacing_segments's
+    checkpoint output) for the given applied bots and convert each row's
+    engine-native LocalSegmentIndex into elapsed match seconds, binned to the
+    nearest 1s TimeBin - the same axis load_bot_pacing_factors uses - so the
+    engine's real Target/Actual pacing curves can be overlaid on the same time axis
+    as the offline-recomputed factor charts.
+
+    PacingSegment rows aren't logged on fixed 1s boundaries - how many segments a
+    round gets (NumSegmentsInRound) depends on how long that round actually ran, so
+    LocalSegmentIndex alone isn't comparable across rounds of different length. Each
+    segment's elapsed time is instead estimated as the midpoint of its slice of the
+    round: (LocalSegmentIndex + 0.5) * (RoundDuration / NumSegmentsInRound).
+
+    Args:
+        pacing_segments_dir: Dir containing batch_*.parquet (checkpoint_dir/[name/]
+            pacing_segments from batch_process_pacing_segments)
+        bots: Applied bot names to keep (e.g. ["MCTS", "NN"]) - rows are further
+            restricted to PacingRole == "Applied" (see batch_process_pacing_segments)
+            since only the applied bot's own Actual/Target values are meaningful
+        config_filter: Optional dict of {column: [allowed values]}, same shape as
+            batch_process_pacing_segments's config_filter (e.g. Timer/ActInterval/
+            Round/SkillLeft/SkillRight)
+
+    Returns:
+        Polars DataFrame with columns Bot, PacingTarget, TimeBin, ActualTempoScaled,
+        ActualThreatScaled, ActualOverallPacingScaled, TargetTempoScaled,
+        TargetThreatScaled, TargetOverallPacingScaled - one row per original segment
+        (not yet aggregated by TimeBin - aggregate downstream as needed), or None if
+        no batch files were found.
+    """
+    batch_files = sorted(glob.glob(os.path.join(pacing_segments_dir, "batch_*.parquet")))
+    if not batch_files:
+        print(f"No pacing segment batches found in {pacing_segments_dir}")
+        return None
+
+    df = pl.concat([pl.scan_parquet(f) for f in batch_files], how="diagonal_relaxed").collect()
+    df = df.filter((pl.col("PacingRole") == "Applied") & pl.col("Bot").is_in(bots))
+
+    if config_filter:
+        for key, allowed in config_filter.items():
+            df = df.filter(pl.col(key).is_in(allowed))
+
+    df = df.filter(
+        (pl.col("NumSegmentsInRound") > 0) & (pl.col("RoundDuration") > 0)
+    ).with_columns(
+        (
+            (pl.col("LocalSegmentIndex") + 0.5)
+            * (pl.col("RoundDuration") / pl.col("NumSegmentsInRound"))
+        ).ceil().clip(lower_bound=1).alias("TimeBin")
+    )
+
+    return df.select([
+        "Bot", "PacingTarget", "TimeBin",
+        "ActualTempoScaled", "ActualThreatScaled", "ActualOverallPacingScaled",
+        "TargetTempoScaled", "TargetThreatScaled", "TargetOverallPacingScaled",
+    ])
+
+
 def batch_process_csvs(base_dir, batch_size=50, checkpoint_dir="batched", time_bin_size=None, compute_timebins=False, compute_pacing=False, input_format="csv"):
     """
     Process CSVs or Parquet files in batches and save checkpoints
