@@ -696,8 +696,8 @@ if __name__ == "__main__":
             "Bots": ["Bot_BT", "Bot_DQN","Bot_FSM","Bot_Fuzzy", "Bot_GA","Bot_LLM","Bot_MCTS", "Bot_MLP", "Bot_NN", "Bot_PPO","Bot_Primitive","Bot_SLM","Bot_Utility"],
             "FocusBotIDs": ["Bot_NN","Bot_MCTS","Bot_MLP"],       # the ones checked as Focus in the inspector
             "IncludeFocusMatchups": True,   # or False, matching that run
-            "SimTargets": ["/Users/defdef/Development/research/sumobot/sumobot/Assets/Resources/Pacing/Sim_Targets/Experiments_real"],        # target file names from Resources/<SimTargetsFolder>
-            "SimConstraints": ["/Users/defdef/Development/research/sumobot/sumobot/Assets/Resources/Pacing/Sim_Constraints"],
+            "SimTargets": ["D:/Workspace/Thesis/sumobot/Assets/Resources/Pacing/Sim_Targets/Experiments_real"],
+            "SimConstraints": ["D:/Workspace/Thesis/sumobot/Assets/Resources/Pacing/Sim_Constraints"],
         }
 
         print("Configuration:")
@@ -968,8 +968,8 @@ if __name__ == "__main__":
             print("SIMULATION_DIR must point at a Sumobot batch run's Logs/Batch/<run> folder.")
             sys.exit(1)
 
-        sim_targets_dir = "/Users/defdef/Development/research/sumobot/sumobot/Assets/Resources/Pacing/Sim_Targets/Experiments_real"
-        sim_constraints_dir = "/Users/defdef/Development/research/sumobot/sumobot/Assets/Resources/Pacing/Sim_Constraints"
+        sim_targets_dir = "D:/Workspace/Thesis/sumobot/Assets/Resources/Pacing/Sim_Targets/Experiments_real"
+        sim_constraints_dir = "D:/Workspace/Thesis/sumobot/Assets/Resources/Pacing/Sim_Constraints"
 
         if not os.path.isdir(converted_dir):
             print(f"Error: {converted_dir} not found")
