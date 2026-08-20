@@ -16,6 +16,7 @@ Expects a tidy DataFrame (pandas or polars) with one row per (Bot, Group, TimeBi
 ...) and one column per factor in FACTOR_NAMES - i.e. compile.generator.
 load_bot_pacing_factors's output, concatenated across bots/groups.
 """
+import json
 import os
 import re
 import numpy as np
@@ -39,6 +40,62 @@ METRIC_TO_SCALED = {
     "Tempo": ("ActualTempoScaled", "TargetTempoScaled"),
     "OverallPacing": ("ActualOverallPacingScaled", "TargetOverallPacingScaled"),
 }
+
+
+def load_pacing_target_curves(sim_targets_dir):
+    """
+    Load the engine's predefined per-tick Threat/Tempo target curves straight from
+    Resources/.../Sim_Targets/<subfolder>/<PacingTarget>.json (ThreatTargets/
+    TempoTargets arrays, e.g. linear_increase.json) - the deterministic curve the
+    dynamic pacing filter steers towards, indexed by LocalSegmentIndex. These values
+    were verified to match the engine's own TargetThreatScaled/TargetTempoScaled
+    columns exactly at every LocalSegmentIndex any round actually reached, so using
+    the JSON directly (instead of reconstructing Target purely from logged
+    PacingSegment rows) lets the Target line span its full defined length even when
+    every observed round ended early - see _draw_target_tracking_panels.
+
+    Args:
+        sim_targets_dir: Folder of pacing target *.json files (Resources/.../
+            Sim_Targets/<subfolder> - must be the subfolder actually used for the
+            run being plotted, since different subfolders define different curve
+            sets/names, e.g. Experiments vs Experiments_real).
+
+    Returns:
+        Dict of {pacing_target_name: {"Threat": np.array, "Tempo": np.array,
+        "OverallPacing": np.array}}, one entry per *.json file in sim_targets_dir.
+    """
+    curves = {}
+    for fname in sorted(os.listdir(sim_targets_dir)):
+        if not fname.endswith(".json"):
+            continue
+        name = os.path.splitext(fname)[0]
+        with open(os.path.join(sim_targets_dir, fname)) as f:
+            data = json.load(f)
+        threat = np.asarray(data["ThreatTargets"], dtype=float)
+        tempo = np.asarray(data["TempoTargets"], dtype=float)
+        curves[name] = {
+            "Threat": threat,
+            "Tempo": tempo,
+            "OverallPacing": (threat + tempo) / 2.0,
+        }
+    return curves
+
+
+def _get_timer(df, default=None):
+    """
+    Pull the configured Timer (match length in seconds) out of df's Timer column -
+    constant across every row once config_filter has pinned it to one value (see
+    compile.generator.load_filtered_target_tracking). Used to spread the
+    deterministic Target curve (indexed 0..N-1, see load_pacing_target_curves) evenly
+    across [0, Timer], independent of how far any observed round's LocalSegmentIndex
+    actually reached.
+    """
+    values = df["Timer"].dropna().unique()
+    if len(values) == 0:
+        return default
+    if len(values) > 1:
+        print(f"⚠️ Multiple Timer values in target-tracking data ({sorted(values)}); using the first.")
+    return float(values[0])
 
 
 def _to_pandas(df):
@@ -381,7 +438,8 @@ def plot_all_overall_pacing_timeseries(df, output_dir=None, width=15, height=5):
     return figs
 
 
-def _draw_target_tracking_panels(axes, track_df, unfiltered_df):
+def _draw_target_tracking_panels(axes, track_df, unfiltered_df, pacing_target=None,
+                                  target_curves=None, target_pool_df=None):
     """
     Shared per-metric drawing logic for plot_filtered_target_tracking and
     plot_filtered_target_tracking_merged: draws the Target/Actual/trend/Unfiltered
@@ -389,30 +447,54 @@ def _draw_target_tracking_panels(axes, track_df, unfiltered_df):
     OverallPacing, in that order). track_df/unfiltered_df are grouped by TimeBin as
     given - callers control pooling (single bot vs every applied bot) by how they
     filter these DataFrames before calling this.
+
+    When target_curves has an entry for pacing_target (see load_pacing_target_curves),
+    the Target line is drawn straight from that deterministic per-tick curve, its N
+    points spread evenly across [0, Timer] (Timer read off target_pool_df/track_df's
+    own Timer column - see _get_timer) - so it spans the full configured match length
+    regardless of how far any observed round's PacingSegment log actually reached.
+    Falls back to reconstructing Target from target_pool_df's logged TimeBin/*Scaled
+    columns (defaults to track_df; bounded by whichever rounds were actually
+    observed) when no curve is available for this pacing_target, or Timer can't be
+    determined.
     """
     actual_color = get_theme_color("primary")
     target_color = get_theme_color("danger")
     unfiltered_color = get_theme_color("secondary")
+    target_pool_df = track_df if target_pool_df is None else target_pool_df
+    curve = target_curves.get(pacing_target) if target_curves else None
+    timer = _get_timer(target_pool_df) if curve is not None else None
+    if curve is not None and timer is None:
+        print(f"⚠️ No Timer value found for PacingTarget={pacing_target}; falling back to logged Target rows.")
+        curve = None
 
     for ax, metric in zip(axes, ["Threat", "Tempo", "OverallPacing"]):
         actual_col, target_col = METRIC_TO_SCALED[metric]
 
-        agg = (
+        actual_agg = (
             track_df.groupby("TimeBin")
-            .agg(
-                Actual_mean=(actual_col, "mean"),
-                Actual_std=(actual_col, "std"),
-                Target_mean=(target_col, "mean"),
-            )
+            .agg(Actual_mean=(actual_col, "mean"), Actual_std=(actual_col, "std"))
             .reset_index()
             .sort_values("TimeBin")
         )
-        x = agg["TimeBin"].values
-        actual_mean = agg["Actual_mean"].values
-        actual_std = np.nan_to_num(agg["Actual_std"].values)
-        target_mean = agg["Target_mean"].values
+        x = actual_agg["TimeBin"].values
+        actual_mean = actual_agg["Actual_mean"].values
+        actual_std = np.nan_to_num(actual_agg["Actual_std"].values)
 
-        ax.plot(x, target_mean, color=target_color, linewidth=2, linestyle="--", label="Target", zorder=2)
+        if curve is not None:
+            target_mean = curve[metric]
+            target_x = (np.arange(len(target_mean)) + 0.5) * (timer / len(target_mean))
+        else:
+            target_agg = (
+                target_pool_df.groupby("TimeBin")[target_col]
+                .mean()
+                .reset_index()
+                .sort_values("TimeBin")
+            )
+            target_x = target_agg["TimeBin"].values
+            target_mean = target_agg[target_col].values
+
+        ax.plot(target_x, target_mean, color=target_color, linewidth=2, linestyle="--", label="Target", zorder=2)
         ax.plot(x, actual_mean, color=actual_color, linewidth=2.5, marker="o", markersize=3,
                 label="Filtered Actual", zorder=3)
         ax.fill_between(x, actual_mean - actual_std, actual_mean + actual_std,
@@ -446,14 +528,19 @@ def _draw_target_tracking_panels(axes, track_df, unfiltered_df):
         ax.legend(fontsize=7, loc="upper right")
 
 
-def plot_filtered_target_tracking(df_factors, df_target_tracking, bot, pacing_target, width=15, height=5):
+def plot_filtered_target_tracking(df_factors, df_target_tracking, bot, pacing_target, width=15, height=5,
+                                   target_curves=None):
     """
     One figure for a single (bot, PacingTarget) pair: 3 panels (Threat, Tempo,
     OverallPacing), each showing the engine's own ground-truth Actual vs Target
     curves for that PacingTarget - i.e. does the dynamic pacing filter actually
     track the curve it was steering towards - with:
       - Target: the predefined curve for this PacingTarget (near-deterministic
-        given Timer + elapsed time, so no meaningful spread across rounds/matches)
+        given Timer + elapsed time, so no meaningful spread across rounds/matches).
+        Drawn from target_curves (see load_pacing_target_curves) when given, so it
+        spans its full defined length even if every observed round for this
+        bot/PacingTarget ended before the match timer ran out; otherwise
+        reconstructed from logged rows and bounded by whatever those rounds reached.
       - Filtered Actual: mean +/- std band across every matching round, plus a
         dotted linear trend line (labeled with slope) showing whether tracking
         systematically drifts over the match rather than just being noisy
@@ -471,15 +558,25 @@ def plot_filtered_target_tracking(df_factors, df_target_tracking, bot, pacing_ta
         df_target_tracking: Raw (unaggregated) DataFrame from compile.generator.
             load_filtered_target_tracking
         bot, pacing_target: Which Bot / PacingTarget to plot
+        target_curves: Optional dict from load_pacing_target_curves - when given and
+            it has an entry for pacing_target, draws the Target line from the
+            deterministic curve instead of from logged rows (see
+            _draw_target_tracking_panels)
 
     Returns:
         Matplotlib Figure, or None if no data matched.
     """
-    track_df = _to_pandas(df_target_tracking)
-    track_df = track_df[(track_df["Bot"] == bot) & (track_df["PacingTarget"] == pacing_target)]
+    all_track_df = _to_pandas(df_target_tracking)
+    track_df = all_track_df[(all_track_df["Bot"] == bot) & (all_track_df["PacingTarget"] == pacing_target)]
     if track_df.empty:
         print(f"⚠️ No target-tracking data for bot={bot}, PacingTarget={pacing_target}")
         return None
+
+    # Every bot sharing this PacingTarget, not just `bot` - so the seg-duration
+    # estimate/fallback Target aggregation (see _draw_target_tracking_panels) is
+    # based on as broad a sample as possible, even if `bot`'s own rounds all ended
+    # early.
+    target_pool_df = all_track_df[all_track_df["PacingTarget"] == pacing_target]
 
     unfiltered_df = None
     if df_factors is not None:
@@ -493,7 +590,8 @@ def plot_filtered_target_tracking(df_factors, df_target_tracking, bot, pacing_ta
             unfiltered_df = factors_bot_df[factors_bot_df["Group"] == "Unfiltered"]
 
     fig, axes = plt.subplots(1, 3, figsize=(width, height))
-    _draw_target_tracking_panels(axes, track_df, unfiltered_df)
+    _draw_target_tracking_panels(axes, track_df, unfiltered_df, pacing_target=pacing_target,
+                                  target_curves=target_curves, target_pool_df=target_pool_df)
 
     fig.suptitle(f"{bot} — {pacing_target}: Filtered Actual vs Target (engine ground truth)",
                  fontsize=13, fontweight="bold")
@@ -501,10 +599,17 @@ def plot_filtered_target_tracking(df_factors, df_target_tracking, bot, pacing_ta
     return fig
 
 
-def plot_all_filtered_target_tracking(df_factors, df_target_tracking, output_dir=None, width=15, height=5):
+def plot_all_filtered_target_tracking(df_factors, df_target_tracking, output_dir=None, width=15, height=5,
+                                       sim_targets_dir=None):
     """
     Iterate every (Bot, PacingTarget) pair present in df_target_tracking and produce
     one Actual-vs-Target tracking figure each (see plot_filtered_target_tracking).
+
+    Args:
+        sim_targets_dir: Optional folder of pacing target *.json files (Resources/
+            .../Sim_Targets/<subfolder> for the run being plotted) - when given, the
+            Target line is drawn from the deterministic curve (see
+            load_pacing_target_curves) instead of being bounded by logged rows.
 
     Returns:
         Dict of {(bot_name, pacing_target): Figure}
@@ -514,6 +619,8 @@ def plot_all_filtered_target_tracking(df_factors, df_target_tracking, output_dir
         print("⚠️ No target-tracking data to plot.")
         return {}
 
+    target_curves = load_pacing_target_curves(sim_targets_dir) if sim_targets_dir else None
+
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
@@ -521,7 +628,8 @@ def plot_all_filtered_target_tracking(df_factors, df_target_tracking, output_dir
     for bot in sorted(track_df["Bot"].dropna().unique()):
         targets = sorted(track_df.loc[track_df["Bot"] == bot, "PacingTarget"].dropna().unique())
         for pacing_target in targets:
-            fig = plot_filtered_target_tracking(df_factors, track_df, bot, pacing_target, width=width, height=height)
+            fig = plot_filtered_target_tracking(df_factors, track_df, bot, pacing_target, width=width, height=height,
+                                                 target_curves=target_curves)
             if fig is None:
                 continue
             figs[(bot, pacing_target)] = fig
@@ -533,7 +641,8 @@ def plot_all_filtered_target_tracking(df_factors, df_target_tracking, output_dir
     return figs
 
 
-def plot_filtered_target_tracking_merged(df_factors, df_target_tracking, pacing_target, bots=None, width=15, height=5):
+def plot_filtered_target_tracking_merged(df_factors, df_target_tracking, pacing_target, bots=None, width=15, height=5,
+                                          target_curves=None):
     """
     Same as plot_filtered_target_tracking, but pools every applied bot together into
     one Actual/Target line per PacingTarget instead of a separate figure per bot -
@@ -550,12 +659,21 @@ def plot_filtered_target_tracking_merged(df_factors, df_target_tracking, pacing_
         pacing_target: Which PacingTarget curve to plot
         bots: Optional list to restrict which bots get pooled (default: every bot
             present in df_target_tracking for this pacing_target)
+        target_curves: Optional dict from load_pacing_target_curves - when given and
+            it has an entry for pacing_target, draws the Target line from the
+            deterministic curve instead of from logged rows (see
+            _draw_target_tracking_panels)
 
     Returns:
         Matplotlib Figure, or None if no data matched.
     """
     track_df = _to_pandas(df_target_tracking)
     track_df = track_df[track_df["PacingTarget"] == pacing_target]
+    # Every bot sharing this PacingTarget, before the optional `bots` restriction -
+    # so the seg-duration estimate/fallback Target aggregation (see
+    # _draw_target_tracking_panels) is based on as broad a sample as possible, even
+    # when `bots` narrows Actual down to bots whose rounds all ended early.
+    target_pool_df = track_df
     if bots is not None:
         track_df = track_df[track_df["Bot"].isin(bots)]
     if track_df.empty:
@@ -575,7 +693,8 @@ def plot_filtered_target_tracking_merged(df_factors, df_target_tracking, pacing_
             unfiltered_df = factors_df[factors_df["Group"] == "Unfiltered"]
 
     fig, axes = plt.subplots(1, 3, figsize=(width, height))
-    _draw_target_tracking_panels(axes, track_df, unfiltered_df)
+    _draw_target_tracking_panels(axes, track_df, unfiltered_df, pacing_target=pacing_target,
+                                  target_curves=target_curves, target_pool_df=target_pool_df)
 
     fig.suptitle(
         f"Applied ({'/'.join(bots_in_data)}) — {pacing_target}: Filtered Actual vs Target (engine ground truth)",
@@ -585,11 +704,18 @@ def plot_filtered_target_tracking_merged(df_factors, df_target_tracking, pacing_
     return fig
 
 
-def plot_all_filtered_target_tracking_merged(df_factors, df_target_tracking, bots=None, output_dir=None, width=15, height=5):
+def plot_all_filtered_target_tracking_merged(df_factors, df_target_tracking, bots=None, output_dir=None, width=15,
+                                              height=5, sim_targets_dir=None):
     """
     Iterate every PacingTarget present in df_target_tracking and produce one
     bot-pooled Actual-vs-Target tracking figure each (see
     plot_filtered_target_tracking_merged).
+
+    Args:
+        sim_targets_dir: Optional folder of pacing target *.json files (Resources/
+            .../Sim_Targets/<subfolder> for the run being plotted) - when given, the
+            Target line is drawn from the deterministic curve (see
+            load_pacing_target_curves) instead of being bounded by logged rows.
 
     Returns:
         Dict of {pacing_target: Figure}
@@ -601,12 +727,15 @@ def plot_all_filtered_target_tracking_merged(df_factors, df_target_tracking, bot
     if bots is not None:
         track_df = track_df[track_df["Bot"].isin(bots)]
 
+    target_curves = load_pacing_target_curves(sim_targets_dir) if sim_targets_dir else None
+
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
     figs = {}
     for pacing_target in sorted(track_df["PacingTarget"].dropna().unique()):
-        fig = plot_filtered_target_tracking_merged(df_factors, track_df, pacing_target, bots=bots, width=width, height=height)
+        fig = plot_filtered_target_tracking_merged(df_factors, track_df, pacing_target, bots=bots, width=width,
+                                                     height=height, target_curves=target_curves)
         if fig is None:
             continue
         figs[pacing_target] = fig

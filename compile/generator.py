@@ -1389,11 +1389,16 @@ def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None)
             Round/SkillLeft/SkillRight)
 
     Returns:
-        Polars DataFrame with columns Bot, PacingTarget, TimeBin, ActualTempoScaled,
-        ActualThreatScaled, ActualOverallPacingScaled, TargetTempoScaled,
-        TargetThreatScaled, TargetOverallPacingScaled - one row per original segment
-        (not yet aggregated by TimeBin - aggregate downstream as needed), or None if
-        no batch files were found.
+        Polars DataFrame with columns Bot, PacingTarget, TimeBin, LocalSegmentIndex,
+        Timer, ActualTempoScaled, ActualThreatScaled, ActualOverallPacingScaled,
+        TargetTempoScaled, TargetThreatScaled, TargetOverallPacingScaled - one row per
+        original segment (not yet aggregated by TimeBin - aggregate downstream as
+        needed), or None if no batch files were found. LocalSegmentIndex is the
+        engine's raw per-round tick index (0-based) - the *Targets arrays in
+        Resources/.../Sim_Targets/<subfolder>/<PacingTarget>.json are indexed by this
+        directly (see plotting.pacing_filter_comparison.load_pacing_target_curves),
+        spread evenly across [0, Timer] rather than TimeBin's per-round real-time
+        estimate.
     """
     batch_files = sorted(glob.glob(os.path.join(pacing_segments_dir, "batch_*.parquet")))
     if not batch_files:
@@ -1417,7 +1422,7 @@ def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None)
     )
 
     return df.select([
-        "Bot", "PacingTarget", "TimeBin",
+        "Bot", "PacingTarget", "TimeBin", "LocalSegmentIndex", "Timer",
         "ActualTempoScaled", "ActualThreatScaled", "ActualOverallPacingScaled",
         "TargetTempoScaled", "TargetThreatScaled", "TargetOverallPacingScaled",
     ])
