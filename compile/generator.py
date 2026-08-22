@@ -1391,14 +1391,21 @@ def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None)
     Returns:
         Polars DataFrame with columns Bot, PacingTarget, TimeBin, LocalSegmentIndex,
         Timer, ActualTempoScaled, ActualThreatScaled, ActualOverallPacingScaled,
-        TargetTempoScaled, TargetThreatScaled, TargetOverallPacingScaled - one row per
-        original segment (not yet aggregated by TimeBin - aggregate downstream as
-        needed), or None if no batch files were found. LocalSegmentIndex is the
-        engine's raw per-round tick index (0-based) - the *Targets arrays in
-        Resources/.../Sim_Targets/<subfolder>/<PacingTarget>.json are indexed by this
-        directly (see plotting.pacing_filter_comparison.load_pacing_target_curves),
-        spread evenly across [0, Timer] rather than TimeBin's per-round real-time
-        estimate.
+        TargetTempoScaled, TargetThreatScaled, TargetOverallPacingScaled, ConfigFolder,
+        GameIndex, Won - one row per original segment (not yet aggregated by TimeBin -
+        aggregate downstream as needed), or None if no batch files were found.
+        LocalSegmentIndex is the engine's raw per-round tick index (0-based) - the
+        *Targets arrays in Resources/.../Sim_Targets/<subfolder>/<PacingTarget>.json
+        are indexed by this directly (see
+        plotting.pacing_filter_comparison.load_pacing_target_curves), spread evenly
+        across [0, Timer] rather than TimeBin's per-round real-time estimate.
+        GameIndex is only unique *within* one ConfigFolder (each config folder's own
+        game_*.json files number from 1) - group by (ConfigFolder, GameIndex)
+        together, never GameIndex alone, to identify one real game (see
+        plotting.pacing_filter_comparison.compute_game_level_tracking_error). Won is
+        whether Bot's side (Side vs GameWinner, where GameWinner is 0=Left/1=Right/
+        2=Draw) won that whole game - constant across every segment row belonging to
+        the same (ConfigFolder, GameIndex).
     """
     batch_files = sorted(glob.glob(os.path.join(pacing_segments_dir, "batch_*.parquet")))
     if not batch_files:
@@ -1418,13 +1425,18 @@ def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None)
         (
             (pl.col("LocalSegmentIndex") + 0.5)
             * (pl.col("RoundDuration") / pl.col("NumSegmentsInRound"))
-        ).ceil().clip(lower_bound=1).alias("TimeBin")
+        ).ceil().clip(lower_bound=1).alias("TimeBin"),
+        (
+            ((pl.col("Side") == "Left") & (pl.col("GameWinner") == 0))
+            | ((pl.col("Side") == "Right") & (pl.col("GameWinner") == 1))
+        ).alias("Won"),
     )
 
     return df.select([
         "Bot", "PacingTarget", "TimeBin", "LocalSegmentIndex", "Timer",
         "ActualTempoScaled", "ActualThreatScaled", "ActualOverallPacingScaled",
         "TargetTempoScaled", "TargetThreatScaled", "TargetOverallPacingScaled",
+        "ConfigFolder", "GameIndex", "Won",
     ])
 
 
