@@ -83,6 +83,41 @@ def load_pacing_target_curves(sim_targets_dir):
     return curves
 
 
+def _resolve_curve_key(pacing_target, available_keys):
+    """
+    Match a df_target_tracking PacingTarget value against the clean curve names
+    load_pacing_target_curves loaded (its *.json filename stems), tolerating a
+    PacingConstraint glued onto the end - some simulation batches' config folders
+    are named "Pacing_<target>_constraint_<constraint>" (no "|" separator; see
+    compile.log_to_parquet.parse_pacing_folder_name), which left PacingTarget itself
+    holding the compound string (e.g. "lin_down_06_04_constraint_avg_bot") in any
+    already-batched parquet - re-running batch_process_pacing_segments would fix it
+    at the source, but that means reprocessing the whole simulation batch just to
+    draw a chart correctly, so this resolves it here instead, purely from data
+    already in hand.
+
+    Tries, in order:
+      1. Exact match - the common case for cleanly-separated ("|") folder names.
+      2. Split on the literal "_constraint_" separator and match the part before it -
+         the specific glued convention seen in practice.
+      3. Longest available_keys entry that's a strict prefix of pacing_target,
+         followed by "_" - covers any other stray glued suffix without needing to
+         know its exact shape upfront.
+
+    Returns the matching key from available_keys, or None if nothing matches.
+    """
+    if pacing_target in available_keys:
+        return pacing_target
+    if "_constraint_" in pacing_target:
+        candidate = pacing_target.split("_constraint_", 1)[0]
+        if candidate in available_keys:
+            return candidate
+    prefix_matches = [k for k in available_keys if pacing_target.startswith(f"{k}_")]
+    if prefix_matches:
+        return max(prefix_matches, key=len)
+    return None
+
+
 def _get_timer(df, default=None):
     """
     Pull the configured Timer (match length in seconds) out of df's Timer column -
@@ -472,7 +507,10 @@ def _draw_target_tracking_panels(axes, track_df, unfiltered_df, pacing_target=No
     target_color = get_theme_color("danger")
     unfiltered_color = get_theme_color("secondary")
     target_pool_df = track_df if target_pool_df is None else target_pool_df
-    curve = target_curves.get(pacing_target) if target_curves else None
+    curve = None
+    if target_curves:
+        curve_key = _resolve_curve_key(pacing_target, target_curves.keys())
+        curve = target_curves.get(curve_key) if curve_key else None
     timer = _get_timer(target_pool_df) if curve is not None else None
     if curve is not None and timer is None:
         print(f"⚠️ No Timer value found for PacingTarget={pacing_target}; falling back to logged Target rows.")
@@ -773,7 +811,10 @@ def _draw_target_tracking_panels_by_bot(axes, track_df, unfiltered_by_bot, bot_c
     """
     target_color = get_theme_color("danger")
     target_pool_df = track_df if target_pool_df is None else target_pool_df
-    curve = target_curves.get(pacing_target) if (include_target and target_curves) else None
+    curve = None
+    if include_target and target_curves:
+        curve_key = _resolve_curve_key(pacing_target, target_curves.keys())
+        curve = target_curves.get(curve_key) if curve_key else None
     timer = _get_timer(target_pool_df) if curve is not None else None
     if curve is not None and timer is None:
         print(f"⚠️ No Timer value found for PacingTarget={pacing_target}; falling back to logged Target rows.")
@@ -1103,6 +1144,33 @@ def compute_target_curve_features(target_curves):
     return table
 
 
+def _merge_on_resolved_curve_key(error_table, feature_table, feature_cols=None):
+    """
+    Join error_table's PacingTarget column against feature_table's PacingTarget
+    index (see compute_target_curve_features), resolving each PacingTarget value
+    through _resolve_curve_key first instead of a plain equality merge - so a
+    compound value like "lin_down_06_04_constraint_avg_bot" still matches the clean
+    curve name "lin_down_06_04" (see _resolve_curve_key's docstring for why that
+    mismatch happens and why it's resolved here rather than by reprocessing).
+
+    Args:
+        feature_cols: Optional subset of feature_table columns to bring in (passed
+            straight to feature_table[feature_cols] before the merge); None keeps
+            every column.
+
+    Returns:
+        error_table with feature_table's columns joined on, restricted to rows whose
+        PacingTarget resolved to a known curve (inner join).
+    """
+    if feature_cols is not None:
+        feature_table = feature_table[feature_cols]
+    curve_keys = list(feature_table.index)
+    resolved = error_table["PacingTarget"].map(lambda pt: _resolve_curve_key(pt, curve_keys))
+    return error_table.assign(_CurveKey=resolved).merge(
+        feature_table, left_on="_CurveKey", right_index=True, how="inner"
+    ).drop(columns="_CurveKey")
+
+
 def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir, width=15, height=5):
     """
     Does tracking error scale with how erratic the target curve is, rather than
@@ -1126,7 +1194,7 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     """
     error_table = compute_target_tracking_error_table(df_target_tracking)
     feature_table = compute_target_curve_features(load_pacing_target_curves(sim_targets_dir))
-    merged = error_table.merge(feature_table, left_on="PacingTarget", right_index=True, how="inner")
+    merged = _merge_on_resolved_curve_key(error_table, feature_table)
 
     fig, axes = plt.subplots(1, 3, figsize=(width, height))
     if merged.empty:
@@ -1184,7 +1252,7 @@ def plot_target_tracking_error_by_archetype_heatmap(df_target_tracking, sim_targ
     """
     error_table = compute_target_tracking_error_table(df_target_tracking)
     feature_table = compute_target_curve_features(load_pacing_target_curves(sim_targets_dir))
-    merged = error_table.merge(feature_table[["Archetype"]], left_on="PacingTarget", right_index=True, how="inner")
+    merged = _merge_on_resolved_curve_key(error_table, feature_table, feature_cols=["Archetype"])
 
     fig, axes = plt.subplots(1, 3, figsize=(width, height))
     if merged.empty:
