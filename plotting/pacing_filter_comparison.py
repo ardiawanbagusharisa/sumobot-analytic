@@ -1386,16 +1386,22 @@ def compute_game_level_tracking_error(df_target_tracking):
     compute_target_tracking_error_table (which collapses every game into one Bot x
     PacingTarget average): plot_tracking_error_vs_winrate needs one independent
     data point per game, not per (Bot, PacingTarget) group, to say anything
-    meaningful about whether tracking quality predicts winning.
+    meaningful about whether tracking quality predicts winning. PacingConstraint
+    is carried along (constant within one ConfigFolder, so free to include in the
+    grouping) for callers that need to split by it, e.g.
+    plot_winrate_by_archetype_heatmap.
 
     Returns:
-        DataFrame with columns Bot, PacingTarget, ConfigFolder, GameIndex, Won,
-        ThreatMAE, TempoMAE, OverallPacingMAE, n_segments.
+        DataFrame with columns Bot, PacingTarget, PacingConstraint, ConfigFolder,
+        GameIndex, Won, ThreatMAE, TempoMAE, OverallPacingMAE, n_segments.
     """
     df = _to_pandas(df_target_tracking)
     rows = []
-    group_cols = ["Bot", "PacingTarget", "ConfigFolder", "GameIndex"]
-    for keys, group in df.groupby(group_cols):
+    group_cols = ["Bot", "PacingTarget", "PacingConstraint", "ConfigFolder", "GameIndex"]
+    # dropna=False - a null PacingConstraint (older data predating that field, or a
+    # config folder name with no constraint suffix) must still keep its game, not
+    # silently disappear because one of the group_cols is null (pandas' default).
+    for keys, group in df.groupby(group_cols, dropna=False):
         row = dict(zip(group_cols, keys))
         row["Won"] = bool(group["Won"].iloc[0])
         row["n_segments"] = int(len(group))
@@ -1481,5 +1487,88 @@ def plot_tracking_error_vs_winrate(df_target_tracking, bin_width=10, width=15, h
         ax.grid(True, axis="y", alpha=0.3, linestyle="--")
 
     fig.suptitle("Tracking Error vs Win Rate (per applied-bot game)", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    return fig
+
+
+def compute_winrate_by_archetype_table(df_target_tracking, target_curves):
+    """
+    One row per real game (see compute_game_level_tracking_error) with its
+    PacingTarget's curve Archetype attached (Flat/Rising/Falling, see
+    compute_target_curve_features/_label_curve_archetypes) instead of the raw
+    PacingTarget name - lets win rate be grouped by curve *shape* rather than
+    needing one column/row per PacingTarget (61+ configs in prod, the same
+    scaling problem plot_target_tracking_error_by_archetype_heatmap solves for
+    tracking error).
+
+    Args:
+        target_curves: Dict from load_pacing_target_curves.
+
+    Returns:
+        compute_game_level_tracking_error's table with an Archetype column
+        joined on (via _merge_on_resolved_curve_key, so it tolerates the same
+        glued "_constraint_" PacingTarget naming that function already handles),
+        restricted to rows whose PacingTarget resolved to a known curve.
+    """
+    game_table = compute_game_level_tracking_error(df_target_tracking)
+    feature_table = compute_target_curve_features(target_curves)
+    return _merge_on_resolved_curve_key(game_table, feature_table, feature_cols=["Archetype"])
+
+
+def plot_winrate_by_archetype_heatmap(df_target_tracking, sim_targets_dir, width=13, height=4.5):
+    """
+    Bot x curve-Archetype heatmap of win rate (see compute_winrate_by_archetype_
+    table) - one panel per PacingConstraint (prod carries avg_bot/top_5/nn, so 3
+    panels there). Mirrors plot_target_tracking_error_by_archetype_heatmap's
+    Bot x Archetype grid, applied to win rate instead of MAE, and additionally
+    split by PacingConstraint since a curve's shape means something different
+    depending on which constraint normalized it - pooling constraints together
+    would blend that apart, the same reasoning the rest of this notebook already
+    splits every PacingConstraint-aware chart by.
+
+    Args:
+        sim_targets_dir: Folder of pacing target *.json files (see
+            load_pacing_target_curves) - required, same reasoning as
+            plot_target_tracking_error_vs_volatility.
+
+    Returns:
+        Matplotlib Figure.
+    """
+    target_curves = load_pacing_target_curves(sim_targets_dir)
+    merged = compute_winrate_by_archetype_table(df_target_tracking, target_curves)
+
+    # None (single "All" panel) only if PacingConstraint is entirely missing -
+    # otherwise one panel per distinct constraint actually present in the data.
+    constraints = sorted(c for c in merged["PacingConstraint"].dropna().unique()) if not merged.empty else []
+    if not constraints:
+        constraints = [None]
+
+    fig, axes = plt.subplots(1, len(constraints), figsize=(width, height), squeeze=False)
+    axes = axes[0]
+    if merged.empty:
+        for ax in axes:
+            ax.text(0.5, 0.5, "No PacingTarget curves matched the tracking data.",
+                    ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    cmap = get_theme_color("heatmap_cmap")
+    for ax, constraint in zip(axes, constraints):
+        sub = merged if constraint is None else merged[merged["PacingConstraint"] == constraint]
+        pivot = sub.pivot_table(index="Bot", columns="Archetype", values="Won", aggfunc="mean")
+        # Always show every archetype column, even ones absent for this
+        # constraint's data (left blank) - keeps the grid the same shape/order
+        # across panels and runs instead of shrinking to whatever showed up.
+        pivot = pivot.reindex(columns=ARCHETYPE_ORDER)
+        sns.heatmap(
+            pivot, annot=True, fmt=".3f", cmap=cmap, linewidths=0.5, vmin=0, vmax=1.0,
+            cbar_kws={"label": "Win Rate"}, ax=ax,
+        )
+        ax.set_title(str(constraint) if constraint is not None else "All", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Target Curve Archetype", fontsize=9)
+        ax.set_ylabel("Bot", fontsize=9)
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+
+    fig.suptitle("Win Rate by Target Curve Archetype (Bot x Archetype, per Constraint)",
+                 fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.92])
     return fig
