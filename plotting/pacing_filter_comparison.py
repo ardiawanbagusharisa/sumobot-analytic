@@ -641,7 +641,7 @@ def plot_filtered_target_tracking(df_factors, df_target_tracking, bot, pacing_ta
     _draw_target_tracking_panels(axes, track_df, unfiltered_df, pacing_target=pacing_target,
                                   target_curves=target_curves, target_pool_df=target_pool_df)
 
-    fig.suptitle(f"{bot} — {pacing_target}: Filtered Actual vs Target (engine ground truth)",
+    fig.suptitle(f"{bot} — {pacing_target}: Filtered Actual vs Target",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.9])
     return fig
@@ -745,7 +745,7 @@ def plot_filtered_target_tracking_merged(df_factors, df_target_tracking, pacing_
                                   target_curves=target_curves, target_pool_df=target_pool_df)
 
     fig.suptitle(
-        f"Applied ({'/'.join(bots_in_data)}) — {pacing_target}: Filtered Actual vs Target (engine ground truth)",
+        f"Applied ({'/'.join(bots_in_data)}) — {pacing_target}: Filtered Actual vs Target",
         fontsize=13, fontweight="bold",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.9])
@@ -966,7 +966,7 @@ def plot_filtered_target_tracking_by_bot(df_factors, df_target_tracking, pacing_
     )
 
     fig.suptitle(
-        f"{pacing_target}: Per-Bot Filtered Actual vs Target (engine ground truth)",
+        f"{pacing_target}: Per-Bot Filtered Actual vs Target",
         fontsize=13, fontweight="bold",
     )
     # One shared legend below the figure instead of one per panel (every panel plots
@@ -1061,7 +1061,7 @@ def compute_target_tracking_error_table(df_target_tracking):
     return pd.DataFrame(rows)
 
 
-def _label_curve_archetypes(table, flat_amplitude_threshold=0.05, monotonic_direction_changes=1):
+def _label_curve_archetypes(table, flat_amplitude_threshold=0.05):
     """
     Bucket each PacingTarget (row of compute_target_curve_features's table) into one
     of a handful of shape archetypes from its OverallPacing curve stats, instead of
@@ -1070,31 +1070,21 @@ def _label_curve_archetypes(table, flat_amplitude_threshold=0.05, monotonic_dire
     *.json target files exist.
 
     - Amplitude below flat_amplitude_threshold: "Flat" (barely moves either way,
-      regardless of direction-change count).
-    - Otherwise, at most monotonic_direction_changes direction flips: "Rising"/
-      "Falling" by the sign of net Trend (a steady ramp, not back-and-forth - a
-      single up-then-down hump still counts as 1 flip and nets out by which way it
-      ended).
-    - Otherwise it's oscillating - split into "Oscillating-Slow"/"Oscillating-Fast"
-      by whether DirectionChanges is at or above the *median* among the oscillating
-      curves in this table, so the fast/slow split adapts to whatever set of curves
-      is actually loaded rather than a fixed change-count cutoff.
+      regardless of how much it wobbles).
+    - Otherwise: "Rising"/"Falling" by the sign of net Trend (first point vs last
+      point), regardless of DirectionChanges - a curve that oscillates its way from
+      low to high still nets out as "Rising", same as a curve that ramps there in a
+      straight line, so there's no separate oscillating bucket.
     """
     amplitude = table["OverallPacingAmplitude"]
     trend = table["OverallPacingTrend"]
-    direction_changes = table["OverallPacingDirectionChanges"]
-
-    oscillating_mask = (amplitude >= flat_amplitude_threshold) & (direction_changes > monotonic_direction_changes)
-    osc_median = direction_changes[oscillating_mask].median() if oscillating_mask.any() else 0
 
     labels = []
-    for amp, tr, dc in zip(amplitude, trend, direction_changes):
+    for amp, tr in zip(amplitude, trend):
         if amp < flat_amplitude_threshold:
             labels.append("Flat")
-        elif dc <= monotonic_direction_changes:
-            labels.append("Rising" if tr >= 0 else "Falling")
         else:
-            labels.append("Oscillating-Fast" if dc >= osc_median else "Oscillating-Slow")
+            labels.append("Rising" if tr >= 0 else "Falling")
     return labels
 
 
@@ -1144,6 +1134,75 @@ def compute_target_curve_features(target_curves):
     return table
 
 
+ARCHETYPE_ORDER = ["Flat", "Rising", "Falling"]
+
+
+def plot_target_curve_archetypes(sim_targets_dir, flat_amplitude_threshold=0.05, width=14, height=5.5):
+    """
+    Diagnostic for _label_curve_archetypes: shows the real OverallPacing curves
+    loaded from sim_targets_dir (see load_pacing_target_curves), so "why did
+    curve X get labeled Y" has a picture to point at instead of just the
+    Amplitude/Trend numbers.
+
+    Left panel: every curve plotted over its LocalSegmentIndex, colored by the
+    Archetype it actually received.
+    Right panel: the decision surface those labels come from - each curve placed
+    at (Amplitude, Trend), with the flat_amplitude_threshold and the Trend=0
+    Rising/Falling split drawn as reference lines.
+
+    Args:
+        sim_targets_dir: Folder of pacing target *.json files (see
+            load_pacing_target_curves).
+        flat_amplitude_threshold: Same knob as _label_curve_archetypes - passed
+            through so the threshold drawn matches the labels shown.
+
+    Returns:
+        Matplotlib Figure.
+    """
+    target_curves = load_pacing_target_curves(sim_targets_dir)
+    table = compute_target_curve_features(target_curves)
+    fig, (ax_curves, ax_scatter) = plt.subplots(1, 2, figsize=(width, height))
+    if table.empty:
+        for ax in (ax_curves, ax_scatter):
+            ax.text(0.5, 0.5, "No target curves found.", ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    table["Archetype"] = _label_curve_archetypes(table, flat_amplitude_threshold=flat_amplitude_threshold)
+    palette = get_theme_color("categorical")
+    colors = {a: palette[i % len(palette)] for i, a in enumerate(ARCHETYPE_ORDER)}
+
+    for pacing_target, curves in target_curves.items():
+        arch = table.loc[pacing_target, "Archetype"]
+        ax_curves.plot(curves["OverallPacing"], color=colors[arch], alpha=0.85, linewidth=1.5)
+    ax_curves.axhspan(0, flat_amplitude_threshold, color="gray", alpha=0.08, zorder=0)
+    handles = [plt.Line2D([0], [0], color=colors[a], lw=2, label=f"{a} (n={(table['Archetype'] == a).sum()})")
+               for a in ARCHETYPE_ORDER if (table["Archetype"] == a).any()]
+    ax_curves.legend(handles=handles, loc="best", fontsize=8)
+    ax_curves.set_xlabel("LocalSegmentIndex")
+    ax_curves.set_ylabel("OverallPacing (target)")
+    ax_curves.set_title(f"Real target curves by Archetype (n={len(table)})")
+
+    for arch in ARCHETYPE_ORDER:
+        sub = table[table["Archetype"] == arch]
+        if sub.empty:
+            continue
+        ax_scatter.scatter(sub["OverallPacingAmplitude"], sub["OverallPacingTrend"],
+                            color=colors[arch], label=arch, s=70, edgecolor="black", linewidth=0.5, zorder=3)
+    for pacing_target, row in table.iterrows():
+        ax_scatter.annotate(pacing_target, (row["OverallPacingAmplitude"], row["OverallPacingTrend"]),
+                             fontsize=7, alpha=0.75, xytext=(4, 4), textcoords="offset points")
+    ax_scatter.axvline(flat_amplitude_threshold, color="gray", linestyle="--", linewidth=1,
+                        label=f"flat_amplitude_threshold={flat_amplitude_threshold}")
+    ax_scatter.axhline(0, color="black", linestyle=":", linewidth=1, label="Rising/Falling split (Trend=0)")
+    ax_scatter.set_xlabel("OverallPacingAmplitude")
+    ax_scatter.set_ylabel("OverallPacingTrend")
+    ax_scatter.set_title("Decision surface: amplitude x trend")
+    ax_scatter.legend(fontsize=7, loc="best")
+
+    fig.tight_layout()
+    return fig
+
+
 def _merge_on_resolved_curve_key(error_table, feature_table, feature_cols=None):
     """
     Join error_table's PacingTarget column against feature_table's PacingTarget
@@ -1171,7 +1230,8 @@ def _merge_on_resolved_curve_key(error_table, feature_table, feature_cols=None):
     ).drop(columns="_CurveKey")
 
 
-def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir, width=15, height=5):
+def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir, bin_width=10, y_bin_width=10,
+                                              width=15, height=5):
     """
     Does tracking error scale with how erratic the target curve is, rather than
     which specific PacingTarget it happens to be? 3 panels (Threat, Tempo,
@@ -1183,11 +1243,21 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     instead, so this scales to any number of target configs without becoming a wall
     of overlapping per-point text.
 
+    Both axes use fixed-width 0.1 bins (matching plot_tracking_error_vs_winrate's
+    MAE bins) instead of auto-scaling to their own data: bin_width/y_bin_width
+    give the *count* of those 0.1-wide bins to show, so the axis spans
+    [0, bin_width * 0.1] - e.g. bin_width=10 covers the full [0, 1] normalized
+    range, bin_width=5 zooms into just [0, 0.5]. So a given x/y position means
+    the same thing on every panel and any two runs of this chart line up.
+
     Args:
         sim_targets_dir: Folder of pacing target *.json files (see
             load_pacing_target_curves) - required here (not optional like elsewhere
             in this module) since curve shape features can only come from the
             deterministic curve, not from logged rows.
+        bin_width: Number of 0.1-wide bins on the x-axis (Volatility), i.e. the
+            x-axis spans [0, bin_width * 0.1] (default 10, i.e. [0, 1]).
+        y_bin_width: Same, for the y-axis (MAE) (default 10).
 
     Returns:
         Matplotlib Figure.
@@ -1207,7 +1277,12 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     palette = get_theme_color("categorical")
     bot_colors = {bot: palette[i % len(palette)] for i, bot in enumerate(bots)}
 
-    for ax, metric in zip(axes, ["Threat", "Tempo", "OverallPacing"]):
+    metrics = ["Threat", "Tempo", "OverallPacing"]
+    x_ticks = np.arange(int(bin_width) + 1) * 0.1
+    y_ticks = np.arange(int(y_bin_width) + 1) * 0.1
+    x_max, y_max = x_ticks[-1], y_ticks[-1]
+
+    for ax, metric in zip(axes, metrics):
         x_col, y_col = f"{metric}Volatility", f"{metric}MAE"
         for bot in bots:
             sub = merged[merged["Bot"] == bot]
@@ -1217,10 +1292,14 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
         trend = _linear_trend(merged[x_col], merged[y_col])
         if trend is not None:
             slope, intercept = trend
-            xs = np.linspace(merged[x_col].min(), merged[x_col].max(), 50)
+            xs = np.linspace(0, x_max, 50)
             ax.plot(xs, slope * xs + intercept, color="gray", linestyle=":", linewidth=1.5,
                     alpha=0.8, zorder=2, label=f"Trend ({slope:+.3f})")
 
+        ax.set_xlim(0, x_max)
+        ax.set_ylim(0, y_max)
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
         ax.set_title(metric, fontsize=12, fontweight="bold")
         ax.set_xlabel(f"{metric} Target Volatility (avg. change per segment)", fontsize=9)
         ax.set_ylabel(f"{metric} MAE (Actual vs Target)", fontsize=9)
@@ -1232,20 +1311,33 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     return fig
 
 
-def plot_target_tracking_error_by_archetype_heatmap(df_target_tracking, sim_targets_dir, width=13, height=4.5):
+def plot_target_tracking_error_by_archetype_heatmap(df_target_tracking, sim_targets_dir, bin_width=10, width=13,
+                                                      height=4.5):
     """
     Bot x curve-Archetype heatmap (see compute_target_curve_features/
     _label_curve_archetypes) of mean tracking error - one panel per metric (Threat,
     Tempo, OverallPacing). Replaces a literal Bot x PacingTarget grid, which stops
     being readable once there are more than a handful of *.json target configs:
-    Archetype buckets every config into Flat/Rising/Falling/Oscillating-Slow/
-    Oscillating-Fast, so the column count stays small and meaningful regardless of
-    how many raw curve files exist.
+    Archetype buckets every config into Flat/Rising/Falling, so the column count
+    stays small and meaningful regardless of how many raw curve files exist.
+
+    The color scale (MAE, encoded here as cell color/annotation rather than a
+    plotted axis) uses fixed-width 0.1 steps (matching plot_tracking_error_vs_
+    winrate's MAE bins) instead of auto-scaling its color range to each panel's
+    own min/max: bin_width gives the *count* of those 0.1-wide steps, so the
+    scale spans [0, bin_width * 0.1] - e.g. bin_width=10 covers the full [0, 1]
+    normalized range, bin_width=5 zooms into just [0, 0.5] (values above that
+    clip to the top color, annotation still shows the real value). So a given
+    color means the same MAE value on every panel and any two runs of this
+    chart line up (same standardization as plot_target_tracking_error_vs_
+    volatility's axes).
 
     Args:
         sim_targets_dir: Folder of pacing target *.json files (see
             load_pacing_target_curves) - required, same reasoning as
             plot_target_tracking_error_vs_volatility.
+        bin_width: Number of 0.1-wide steps on the MAE color scale, i.e. the
+            scale spans [0, bin_width * 0.1] (default 10, i.e. [0, 1]).
 
     Returns:
         Matplotlib Figure.
@@ -1262,11 +1354,17 @@ def plot_target_tracking_error_by_archetype_heatmap(df_target_tracking, sim_targ
         return fig
 
     cmap = get_theme_color("heatmap_cmap")
+    cbar_ticks = np.arange(int(bin_width) + 1) * 0.1
+    cbar_max = cbar_ticks[-1]
     for ax, metric in zip(axes, ["Threat", "Tempo", "OverallPacing"]):
         pivot = merged.pivot_table(index="Bot", columns="Archetype", values=f"{metric}MAE", aggfunc="mean")
+        # Always show every archetype column, even ones absent from this
+        # metric/run's data (left blank) - keeps the grid the same shape/order
+        # across panels and runs instead of shrinking to whatever showed up.
+        pivot = pivot.reindex(columns=ARCHETYPE_ORDER)
         sns.heatmap(
-            pivot, annot=True, fmt=".3f", cmap=cmap, linewidths=0.5,
-            cbar_kws={"label": "Mean MAE (lower = better)"}, ax=ax,
+            pivot, annot=True, fmt=".3f", cmap=cmap, linewidths=0.5, vmin=0, vmax=cbar_max,
+            cbar_kws={"label": "Mean MAE (lower = better)", "ticks": cbar_ticks}, ax=ax,
         )
         ax.set_title(metric, fontsize=12, fontweight="bold")
         ax.set_xlabel("Target Curve Archetype", fontsize=9)
@@ -1307,27 +1405,35 @@ def compute_game_level_tracking_error(df_target_tracking):
     return pd.DataFrame(rows)
 
 
-def plot_tracking_error_vs_winrate(df_target_tracking, n_bins=5, width=15, height=5):
+def plot_tracking_error_vs_winrate(df_target_tracking, bin_width=10, width=15, height=5):
     """
     Does better Actual-vs-Target tracking (lower MAE) actually predict winning? 3
     panels (Threat, Tempo, OverallPacing): every applied bot's individual game gets
     one MAE number (compute_game_level_tracking_error, pooled across bots for sample
-    size), binned into up to n_bins MAE quantiles (low error -> high error, left to
-    right), and each bin's win rate is drawn as a bar with a binomial standard-error
-    whisker and its game count labeled above. Each panel's title also reports the
-    point-biserial correlation r between the continuous per-game MAE and the binary
-    Won outcome (equivalent to Pearson r) - the bars show the shape of the
-    relationship, r summarizes its direction/strength in one number. A dotted
-    reference line at 0.5 marks a coin-flip win rate.
+    size), binned into fixed-width 0.1 MAE bins (low error -> high error, left to
+    right), and each bin's win rate is drawn as a bar with a binomial
+    standard-error whisker and its game count labeled above. Fixed-width bins
+    (rather than quantile bins) keep the x-axis directly comparable across
+    panels/metrics/runs, since a given bin - e.g. "0.100-0.200" - always means
+    the same absolute error range regardless of how the underlying MAE values
+    happen to be distributed. Each panel's title also reports the point-biserial
+    correlation r between the continuous per-game MAE and the binary Won outcome
+    (equivalent to Pearson r) - the bars show the shape of the relationship, r
+    summarizes its direction/strength in one number. A dotted reference line at
+    0.5 marks a coin-flip win rate.
 
     Args:
-        n_bins: Requested quantile bin count; silently reduced (via pandas.qcut's
-            duplicates="drop") when there aren't enough distinct MAE values to fill
-            that many bins.
+        bin_width: Number of 0.1-wide MAE bins, i.e. the x-axis spans
+            [0, bin_width * 0.1] (default 10, i.e. the full normalized [0, 1]
+            MAE range in 10 bins of 0.1 each; bin_width=5 would only cover
+            [0, 0.5]). All bins in that range are always drawn, even ones with
+            zero games (bar height 0, "n=0"), so the x-axis is identical across
+            all 3 panels and any two runs of this chart.
 
     Returns:
         Matplotlib Figure.
     """
+    bin_edges = np.arange(int(bin_width) + 1) * 0.1
     table = compute_game_level_tracking_error(df_target_tracking)
     fig, axes = plt.subplots(1, 3, figsize=(width, height))
     if table.empty:
@@ -1347,22 +1453,23 @@ def plot_tracking_error_vs_winrate(df_target_tracking, n_bins=5, width=15, heigh
 
         r = float(np.corrcoef(sub[col], sub["Won"].astype(float))[0, 1])
 
-        try:
-            mae_bin = pd.qcut(sub[col], min(n_bins, sub[col].nunique()), duplicates="drop")
-        except ValueError:
-            mae_bin = pd.cut(sub[col], 1)
+        # observed=False keeps every bin_edges bin in the result (mean=NaN,
+        # count=0 for ones with no games in this sub/metric) so all 3 panels
+        # share the same fixed 0.0-0.1 ... 0.9-1.0 bin set/x-axis, instead of
+        # each only showing whichever bins happened to contain data.
+        mae_bin = pd.cut(sub[col], bin_edges, include_lowest=True)
         sub = sub.assign(MAEBin=mae_bin)
 
-        binned = sub.groupby("MAEBin", observed=True)["Won"].agg(["mean", "count"]).reset_index()
+        binned = sub.groupby("MAEBin", observed=False)["Won"].agg(["mean", "count"]).reset_index()
         binned["se"] = np.sqrt(binned["mean"] * (1 - binned["mean"]) / binned["count"])
         labels = [f"{iv.left:.3f}-{iv.right:.3f}" for iv in binned["MAEBin"]]
 
         x = np.arange(len(binned))
-        ax.bar(x, binned["mean"], yerr=binned["se"], color=bar_color, alpha=0.8,
+        ax.bar(x, binned["mean"].fillna(0), yerr=binned["se"].fillna(0), color=bar_color, alpha=0.8,
                edgecolor="black", linewidth=0.5, capsize=4, zorder=3)
-        for xi, mean, count in zip(x, binned["mean"], binned["count"]):
-            ax.text(xi, min(mean + binned["se"].max() + 0.03, 1.0), f"n={count}",
-                    ha="center", fontsize=7, zorder=4)
+        for xi, mean, se, count in zip(x, binned["mean"], binned["se"], binned["count"]):
+            label_y = 0.03 if pd.isna(mean) else min(mean + (0 if pd.isna(se) else se) + 0.03, 1.0)
+            ax.text(xi, label_y, f"n={count}", ha="center", fontsize=7, zorder=4)
 
         ax.axhline(0.5, color="gray", linestyle=":", linewidth=1, alpha=0.6, zorder=1)
         ax.set_xticks(x)

@@ -1389,11 +1389,15 @@ def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None)
             Round/SkillLeft/SkillRight)
 
     Returns:
-        Polars DataFrame with columns Bot, PacingTarget, TimeBin, LocalSegmentIndex,
-        Timer, ActualTempoScaled, ActualThreatScaled, ActualOverallPacingScaled,
-        TargetTempoScaled, TargetThreatScaled, TargetOverallPacingScaled, ConfigFolder,
-        GameIndex, Won - one row per original segment (not yet aggregated by TimeBin -
-        aggregate downstream as needed), or None if no batch files were found.
+        Polars DataFrame with columns Bot, PacingTarget, PacingConstraint, TimeBin,
+        LocalSegmentIndex, Timer, ActualTempoScaled, ActualThreatScaled,
+        ActualOverallPacingScaled, TargetTempoScaled, TargetThreatScaled,
+        TargetOverallPacingScaled, ConfigFolder, GameIndex, Won - one row per
+        original segment (not yet aggregated by TimeBin - aggregate downstream as
+        needed), or None if no batch files were found. PacingConstraint is the
+        normalization/constraint mode parsed alongside PacingTarget (see
+        compile.log_to_parquet.parse_pacing_folder_name) - None for any config
+        folder whose name didn't carry one.
         LocalSegmentIndex is the engine's raw per-round tick index (0-based) - the
         *Targets arrays in Resources/.../Sim_Targets/<subfolder>/<PacingTarget>.json
         are indexed by this directly (see
@@ -1433,7 +1437,7 @@ def load_filtered_target_tracking(pacing_segments_dir, bots, config_filter=None)
     )
 
     return df.select([
-        "Bot", "PacingTarget", "TimeBin", "LocalSegmentIndex", "Timer",
+        "Bot", "PacingTarget", "PacingConstraint", "TimeBin", "LocalSegmentIndex", "Timer",
         "ActualTempoScaled", "ActualThreatScaled", "ActualOverallPacingScaled",
         "TargetTempoScaled", "TargetThreatScaled", "TargetOverallPacingScaled",
         "ConfigFolder", "GameIndex", "Won",

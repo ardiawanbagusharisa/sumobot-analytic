@@ -368,7 +368,7 @@ def parse_pacing_folder_name(config_name: str):
     Extract the dynamic pacing target name and the constraint/normalization mode
     from a config folder name.
 
-    Folder names look like:
+    Folder names normally look like:
         Timer_60__ActInterval_0.1__...__Pacing_linear_decrease_0.6_to_0.4_60s|avg_bot
 
     The "Pacing_" segment carries the target curve identifier and, after a "|",
@@ -376,7 +376,21 @@ def parse_pacing_folder_name(config_name: str):
         target = "linear_decrease_0.6_to_0.4_60s"
         constraint = "avg_bot"
 
-    Returns (target, constraint) - constraint is None if no "|" is present.
+    Some older/other simulation batches glue the two together with a literal
+    "_constraint_" instead of "|" (no pipe at all), e.g.:
+        Pacing_lin_down_06_04_constraint_avg_bot
+    which without handling here would leave "avg_bot"/"nn" stuck onto the end of
+    target ("lin_down_06_04_constraint_avg_bot") - a string that then can't
+    exact-match any Sim_Targets/<subfolder>/<target>.json filename in
+    plotting.pacing_filter_comparison.load_pacing_target_curves, silently
+    breaking the Target curve lookup there (falls back to reconstructing Target
+    from logged rows, which is bounded by however far any observed round reached
+    rather than the full curve). Falling back to "_constraint_" as a second
+    separator (only tried when "|" isn't present) fixes this at the source, so
+    every downstream consumer of PacingTarget/PacingConstraint sees a clean split
+    regardless of which convention the batch used.
+
+    Returns (target, constraint) - constraint is None if neither separator is present.
     """
     pacing_segment = None
     for seg in config_name.split("__"):
@@ -389,6 +403,8 @@ def parse_pacing_folder_name(config_name: str):
 
     if "|" in pacing_segment:
         target, constraint = pacing_segment.split("|", 1)
+    elif "_constraint_" in pacing_segment:
+        target, constraint = pacing_segment.split("_constraint_", 1)
     else:
         target, constraint = pacing_segment, None
 
