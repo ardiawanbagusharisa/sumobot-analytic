@@ -1231,7 +1231,7 @@ def _merge_on_resolved_curve_key(error_table, feature_table, feature_cols=None):
 
 
 def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir, bin_width=10, y_bin_width=10,
-                                              width=15, height=5):
+                                              max_x_axis=None, width=15, height=5):
     """
     Does tracking error scale with how erratic the target curve is, rather than
     which specific PacingTarget it happens to be? 3 panels (Threat, Tempo,
@@ -1243,21 +1243,33 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     instead, so this scales to any number of target configs without becoming a wall
     of overlapping per-point text.
 
-    Both axes use fixed-width 0.1 bins (matching plot_tracking_error_vs_winrate's
-    MAE bins) instead of auto-scaling to their own data: bin_width/y_bin_width
-    give the *count* of those 0.1-wide bins to show, so the axis spans
-    [0, bin_width * 0.1] - e.g. bin_width=10 covers the full [0, 1] normalized
-    range, bin_width=5 zooms into just [0, 0.5]. So a given x/y position means
-    the same thing on every panel and any two runs of this chart line up.
+    Both axes tick at fixed, evenly-spaced steps instead of auto-scaling to their
+    own data, so a given x/y position means the same thing on every panel and any
+    two runs of this chart line up. y always uses fixed-width 0.1 steps (matching
+    plot_tracking_error_vs_winrate's MAE bins): y_bin_width gives the *count* of
+    those steps, so the y-axis spans [0, y_bin_width * 0.1]. x does the same by
+    default (bin_width 0.1-wide steps spanning [0, bin_width * 0.1]) unless
+    max_x_axis is given, in which case the x-axis spans [0, max_x_axis] instead,
+    split into bin_width *equal* steps of max_x_axis / bin_width each (not fixed
+    at 0.1) - e.g. max_x_axis=0.2, bin_width=5 ticks at 0, 0.04, 0.08, 0.12, 0.16,
+    0.2, for zooming into a narrow Volatility range at a finer resolution than
+    0.1-wide steps would allow.
 
     Args:
         sim_targets_dir: Folder of pacing target *.json files (see
             load_pacing_target_curves) - required here (not optional like elsewhere
             in this module) since curve shape features can only come from the
             deterministic curve, not from logged rows.
-        bin_width: Number of 0.1-wide bins on the x-axis (Volatility), i.e. the
-            x-axis spans [0, bin_width * 0.1] (default 10, i.e. [0, 1]).
-        y_bin_width: Same, for the y-axis (MAE) (default 10).
+        bin_width: Number of x-axis (Volatility) steps. Without max_x_axis, each
+            step is fixed at 0.1 wide, so the x-axis spans [0, bin_width * 0.1]
+            (default 10, i.e. [0, 1]). With max_x_axis, this instead is the
+            number of equal divisions of [0, max_x_axis].
+        y_bin_width: Number of 0.1-wide steps on the y-axis (MAE), i.e. the
+            y-axis spans [0, y_bin_width * 0.1] (default 10, i.e. [0, 1]).
+        max_x_axis: Optional explicit x-axis (Volatility) upper bound. When
+            given, overrides bin_width's default fixed-0.1-step behavior - the
+            x-axis spans [0, max_x_axis] split into bin_width equal steps
+            instead.
 
     Returns:
         Matplotlib Figure.
@@ -1278,7 +1290,10 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     bot_colors = {bot: palette[i % len(palette)] for i, bot in enumerate(bots)}
 
     metrics = ["Threat", "Tempo", "OverallPacing"]
-    x_ticks = np.arange(int(bin_width) + 1) * 0.1
+    if max_x_axis is not None:
+        x_ticks = np.linspace(0, max_x_axis, int(bin_width) + 1)
+    else:
+        x_ticks = np.arange(int(bin_width) + 1) * 0.1
     y_ticks = np.arange(int(y_bin_width) + 1) * 0.1
     x_max, y_max = x_ticks[-1], y_ticks[-1]
 
