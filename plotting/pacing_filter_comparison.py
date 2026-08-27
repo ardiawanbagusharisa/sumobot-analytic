@@ -1233,15 +1233,22 @@ def _merge_on_resolved_curve_key(error_table, feature_table, feature_cols=None):
 def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir, bin_width=10, y_bin_width=10,
                                               max_x_axis=None, width=15, height=5):
     """
-    Does tracking error scale with how erratic the target curve is, rather than
-    which specific PacingTarget it happens to be? 3 panels (Threat, Tempo,
-    OverallPacing): x = that metric's target curve Volatility (see
-    compute_target_curve_features), y = that metric's Actual-vs-Target MAE (see
-    compute_target_tracking_error_table), one point per (Bot, PacingTarget), colored
-    by Bot, with a linear trend line per panel. Deliberately never plots or labels
-    PacingTarget identity anywhere - swaps it out for a continuous shape feature
-    instead, so this scales to any number of target configs without becoming a wall
-    of overlapping per-point text.
+    Does tracking error scale with how big a swing the target curve demands,
+    rather than which specific PacingTarget it happens to be? 3 panels (Threat,
+    Tempo, OverallPacing): x = that metric's target curve Amplitude (max - min
+    over the whole curve, see compute_target_curve_features), y = that metric's
+    Actual-vs-Target MAE (see compute_target_tracking_error_table), one point per
+    (Bot, PacingTarget), colored by Bot, with a linear trend line per panel.
+    Deliberately never plots or labels PacingTarget identity anywhere - swaps it
+    out for a continuous shape feature instead, so this scales to any number of
+    target configs without becoming a wall of overlapping per-point text.
+
+    Amplitude (not Volatility, mean step-to-step change) is used here because a
+    curve with one big single-step leap - a step function that jumps once and
+    stays flat the rest of the way - gets that leap averaged away by Volatility
+    (diluted across every other near-zero step), while Amplitude (max - min)
+    still reflects it directly; Volatility would put every curve near x=0
+    regardless of whether some of them actually contain a large leap.
 
     Both axes tick at fixed, evenly-spaced steps instead of auto-scaling to their
     own data, so a given x/y position means the same thing on every panel and any
@@ -1252,7 +1259,7 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     max_x_axis is given, in which case the x-axis spans [0, max_x_axis] instead,
     split into bin_width *equal* steps of max_x_axis / bin_width each (not fixed
     at 0.1) - e.g. max_x_axis=0.2, bin_width=5 ticks at 0, 0.04, 0.08, 0.12, 0.16,
-    0.2, for zooming into a narrow Volatility range at a finer resolution than
+    0.2, for zooming into a narrow Amplitude range at a finer resolution than
     0.1-wide steps would allow.
 
     Args:
@@ -1260,13 +1267,13 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
             load_pacing_target_curves) - required here (not optional like elsewhere
             in this module) since curve shape features can only come from the
             deterministic curve, not from logged rows.
-        bin_width: Number of x-axis (Volatility) steps. Without max_x_axis, each
+        bin_width: Number of x-axis (Amplitude) steps. Without max_x_axis, each
             step is fixed at 0.1 wide, so the x-axis spans [0, bin_width * 0.1]
             (default 10, i.e. [0, 1]). With max_x_axis, this instead is the
             number of equal divisions of [0, max_x_axis].
         y_bin_width: Number of 0.1-wide steps on the y-axis (MAE), i.e. the
             y-axis spans [0, y_bin_width * 0.1] (default 10, i.e. [0, 1]).
-        max_x_axis: Optional explicit x-axis (Volatility) upper bound. When
+        max_x_axis: Optional explicit x-axis (Amplitude) upper bound. When
             given, overrides bin_width's default fixed-0.1-step behavior - the
             x-axis spans [0, max_x_axis] split into bin_width equal steps
             instead.
@@ -1298,7 +1305,7 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
     x_max, y_max = x_ticks[-1], y_ticks[-1]
 
     for ax, metric in zip(axes, metrics):
-        x_col, y_col = f"{metric}Volatility", f"{metric}MAE"
+        x_col, y_col = f"{metric}Amplitude", f"{metric}MAE"
         for bot in bots:
             sub = merged[merged["Bot"] == bot]
             ax.scatter(sub[x_col], sub[y_col], color=bot_colors[bot], alpha=0.75,
@@ -1316,12 +1323,12 @@ def plot_target_tracking_error_vs_volatility(df_target_tracking, sim_targets_dir
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
         ax.set_title(metric, fontsize=12, fontweight="bold")
-        ax.set_xlabel(f"{metric} Target Volatility (avg. change per segment)", fontsize=9)
+        ax.set_xlabel(f"{metric} Target Amplitude (max - min)", fontsize=9)
         ax.set_ylabel(f"{metric} MAE (Actual vs Target)", fontsize=9)
         ax.grid(True, alpha=0.3, linestyle="--")
         ax.legend(fontsize=7, loc="best")
 
-    fig.suptitle("Tracking Error vs Target Curve Volatility (by Bot)", fontsize=13, fontweight="bold")
+    fig.suptitle("Tracking Error vs Target Curve Amplitude (by Bot)", fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.92])
     return fig
 
