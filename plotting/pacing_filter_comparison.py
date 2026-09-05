@@ -1690,73 +1690,76 @@ def compute_final_target_winrate_table(df_target_tracking):
     return pd.DataFrame(rows)
 
 
-def _draw_winrate_by_type_and_value_row(axes, sub_table, types, type_colors, bin_edges, row_label=None):
+def _draw_winrate_by_type_and_value_panel(ax, table, types, type_colors, bin_edges, metric, title):
     """
-    Draws the 3 (Threat, Tempo, OverallPacing) win-rate-by-Type-and-value panels
-    for one PacingConstraint's worth of games into the given axes row. Factored
-    out of plot_winrate_by_target_type_and_value so that function can repeat this
-    once per PacingConstraint (see its docstring for why constraints can't be
-    pooled) without duplicating the binning/drawing logic per row.
+    Draws one metric's win-rate-by-Type-and-value bar group into a single given
+    axis. Factored out of plot_winrate_by_target_type_and_value so each metric
+    (Threat/Tempo/OverallPacing) gets its own standalone figure instead of 3
+    panels sharing one figure - each is a genuinely separate chart the user can
+    read/save/scroll independently rather than a squeezed-together row.
     """
     metric_cols = {
         "Threat": "FinalThreatTarget", "Tempo": "FinalTempoTarget", "OverallPacing": "FinalOverallPacingTarget",
     }
+    col = metric_cols[metric]
     n_bins = len(bin_edges) - 1
     bar_width = 0.8 / max(len(types), 1)
 
-    for ax, metric in zip(axes, ["Threat", "Tempo", "OverallPacing"]):
-        col = metric_cols[metric]
-        sub_all = sub_table.dropna(subset=[col])
-        title = metric if row_label is None else f"{row_label} — {metric}"
-        if sub_all.empty:
-            ax.text(0.5, 0.5, "No data.", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(title, fontsize=11, fontweight="bold")
-            continue
+    sub_all = table.dropna(subset=[col])
+    if sub_all.empty:
+        ax.text(0.5, 0.5, "No data.", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        return
 
-        # observed=False keeps every bin_edges bin in each Type's grouped result
-        # (mean=NaN, count=0 for empty ones) so every Type's bars share the same
-        # fixed bin set/x-axis, instead of each Type only showing bins it has data in.
-        value_bin = pd.cut(sub_all[col], bin_edges, include_lowest=True)
-        sub_all = sub_all.assign(ValueBin=value_bin)
-        categories = sub_all["ValueBin"].cat.categories
+    # observed=False keeps every bin_edges bin in each Type's grouped result
+    # (mean=NaN, count=0 for empty ones) so every Type's bars share the same
+    # fixed bin set/x-axis, instead of each Type only showing bins it has data in.
+    value_bin = pd.cut(sub_all[col], bin_edges, include_lowest=True)
+    sub_all = sub_all.assign(ValueBin=value_bin)
+    categories = sub_all["ValueBin"].cat.categories
 
-        x = np.arange(n_bins)
-        for i, t in enumerate(types):
-            sub = sub_all[sub_all["Type"] == t]
-            binned = sub.groupby("ValueBin", observed=False)["Won"].agg(["mean", "count"]).reindex(categories)
-            binned["se"] = np.sqrt(binned["mean"] * (1 - binned["mean"]) / binned["count"])
-            offset = (i - (len(types) - 1) / 2) * bar_width
-            ax.bar(x + offset, binned["mean"].fillna(0), width=bar_width, yerr=binned["se"].fillna(0),
-                   color=type_colors[t], alpha=0.85, edgecolor="black", linewidth=0.5, capsize=3,
-                   label=f"{t} (n={int(len(sub))})", zorder=3)
-            for xi, mean, count in zip(x, binned["mean"], binned["count"]):
-                if count > 0:
-                    ax.text(xi + offset, min((0 if pd.isna(mean) else mean) + 0.03, 1.0), f"{int(count)}",
-                            ha="center", fontsize=6, zorder=4)
+    x = np.arange(n_bins)
+    for i, t in enumerate(types):
+        sub = sub_all[sub_all["Type"] == t]
+        binned = sub.groupby("ValueBin", observed=False)["Won"].agg(["mean", "count"]).reindex(categories)
+        binned["se"] = np.sqrt(binned["mean"] * (1 - binned["mean"]) / binned["count"])
+        offset = (i - (len(types) - 1) / 2) * bar_width
+        ax.bar(x + offset, binned["mean"].fillna(0), width=bar_width, yerr=binned["se"].fillna(0),
+               color=type_colors[t], alpha=0.85, edgecolor="black", linewidth=0.5, capsize=3,
+               label=f"{t} (n={int(len(sub))})", zorder=3)
+        for xi, mean, count in zip(x, binned["mean"], binned["count"]):
+            if count > 0:
+                ax.text(xi + offset, min((0 if pd.isna(mean) else mean) + 0.03, 1.0), f"{int(count)}",
+                        ha="center", fontsize=6, zorder=4)
 
-        labels = [f"{iv.left:.1f}-{iv.right:.1f}" for iv in categories]
-        ax.axhline(0.5, color="gray", linestyle=":", linewidth=1, alpha=0.6, zorder=1)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=7)
-        ax.set_ylim(0, 1.1)
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.set_xlabel(f"Final {metric} Target value bin", fontsize=9)
-        ax.set_ylabel("Win Rate", fontsize=9)
-        ax.grid(True, axis="y", alpha=0.3, linestyle="--")
-        ax.legend(fontsize=7, loc="best")
+    labels = [f"{iv.left:.1f}-{iv.right:.1f}" for iv in categories]
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1, alpha=0.6, zorder=1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+    ax.set_ylim(0, 1.1)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_xlabel(f"Final {metric} Target value bin", fontsize=9)
+    ax.set_ylabel("Win Rate", fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3, linestyle="--")
+    ax.legend(fontsize=8, loc="best")
 
 
-def plot_winrate_by_target_type_and_value(df_target_tracking, bin_width=10, width=15, height=5):
+def plot_winrate_by_target_type_and_value(df_target_tracking, metric, bin_width=10, width=10, height=5.5,
+                                           constraint=None):
     """
     Does win rate depend on where the target curve is actually set, once games are
     first split by target Type (Constant/Linear/Sigmoid/Step/Other, see
     _classify_target_type) rather than averaged across every target shape first?
-    One row of 3 panels (Threat, Tempo, OverallPacing) per PacingConstraint: x =
-    that metric's final logged target value (see
+    One standalone figure for a single metric (Threat, Tempo, or OverallPacing):
+    x = that metric's final logged target value (see
     compute_final_target_winrate_table), binned into fixed-width 0.1 bins
     (matching plot_tracking_error_vs_winrate's MAE bins), one colored bar group
     per Type within each bin, y = win rate with a binomial standard-error whisker
     and game count labeled above each bar.
+
+    Deliberately one metric per figure rather than all 3 sharing one row of
+    panels - each is its own chart to read/save independently. Call this 3x (once
+    per metric) to get the full Threat/Tempo/OverallPacing picture.
 
     This is the direct answer to "compare win rate at different target levels,
     within a target type" that plot_tracking_error_vs_winrate can't give - that
@@ -1764,53 +1767,45 @@ def plot_winrate_by_target_type_and_value(df_target_tracking, bin_width=10, widt
     Constant-high vs Constant-low difference gets diluted against Linear/Sigmoid
     games in the same error bin. Here Type is kept as a first-class grouping
     dimension instead, so e.g. Constant bars at a high value bin can be compared
-    directly against Constant bars at a low one.
-
-    Split into one row per PacingConstraint (prod carries avg_bot/top_5/nn - same
-    reasoning as plot_winrate_by_archetype_heatmap: a target's difficulty means
-    something different depending on which constraint normalized it, so pooling
-    constraints together would blend that apart and can make a bot's win rate
-    look erratic/small across target levels for reasons that have nothing to do
-    with the target level itself - it's really a mix of easier/harder constraint
-    games landing in the same bin). A dotted reference line at 0.5 marks a
-    coin-flip win rate.
+    directly against Constant bars at a low one. A dotted reference line at 0.5
+    marks a coin-flip win rate.
 
     Args:
+        metric: Which of "Threat"/"Tempo"/"OverallPacing" to plot.
         bin_width: Number of 0.1-wide final-target-value bins, i.e. the x-axis
             spans [0, bin_width * 0.1] (default 10, i.e. the full normalized
             [0, 1] range). All bins are always drawn (even ones with zero games
-            for a given Type), so the x-axis is identical across all rows/panels
-            and any two runs of this chart.
+            for a given Type), so the x-axis is identical across any two runs of
+            this chart.
+        constraint: Restrict to games under this single PacingConstraint (e.g.
+            "avg_bot"/"top_5"/"nn" on prod) - pooling every constraint together
+            (default None) can make win rate look erratic/small across target
+            levels for reasons that have nothing to do with the target level
+            itself (a mix of easier/harder constraint games landing in the same
+            bin), so callers that care about the per-constraint breakdown should
+            call this once per constraint value instead.
 
     Returns:
         Matplotlib Figure.
     """
     bin_edges = np.arange(int(bin_width) + 1) * 0.1
     table = compute_final_target_winrate_table(df_target_tracking)
+    if constraint is not None:
+        table = table[table["PacingConstraint"] == constraint]
+
+    fig, ax = plt.subplots(1, 1, figsize=(width, height))
     if table.empty:
-        fig, axes = plt.subplots(1, 3, figsize=(width, height))
-        for ax in axes:
-            ax.text(0.5, 0.5, "No per-game target data to plot.", ha="center", va="center", transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No per-game target data to plot.", ha="center", va="center", transform=ax.transAxes)
         return fig
 
     types = [t for t in TARGET_TYPE_ORDER if t in table["Type"].unique()]
     palette = get_theme_color("categorical")
     type_colors = {t: palette[i % len(palette)] for i, t in enumerate(types)}
 
-    # None (single unlabeled row) only if PacingConstraint is entirely missing -
-    # otherwise one row per distinct constraint actually present in the data, same
-    # convention as plot_winrate_by_archetype_heatmap.
-    constraints = sorted(c for c in table["PacingConstraint"].dropna().unique())
-    if not constraints:
-        constraints = [None]
-
-    fig, axes_grid = plt.subplots(len(constraints), 3, figsize=(width, height * len(constraints)), squeeze=False)
-    for row_axes, constraint in zip(axes_grid, constraints):
-        sub_table = table if constraint is None else table[table["PacingConstraint"] == constraint]
-        _draw_winrate_by_type_and_value_row(row_axes, sub_table, types, type_colors, bin_edges, row_label=constraint)
-
-    fig.suptitle("Win Rate by Target Type and Final Target Value (per Constraint)", fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 1 - 0.05 / len(constraints)])
+    label = "All Constraints (Average)" if constraint is None else constraint
+    _draw_winrate_by_type_and_value_panel(ax, table, types, type_colors, bin_edges, metric,
+                                           title=f"{label} — {metric}")
+    fig.tight_layout()
     return fig
 
 
