@@ -1690,48 +1690,14 @@ def compute_final_target_winrate_table(df_target_tracking):
     return pd.DataFrame(rows)
 
 
-def plot_winrate_by_target_type_and_value(df_target_tracking, bin_width=10, width=15, height=5):
+def _draw_winrate_by_type_and_value_row(axes, sub_table, types, type_colors, bin_edges, row_label=None):
     """
-    Does win rate depend on where the target curve is actually set, once games are
-    first split by target Type (Constant/Linear/Sigmoid/Other, see
-    _classify_target_type) rather than averaged across every target shape first?
-    3 panels (Threat, Tempo, OverallPacing): x = that metric's final logged target
-    value (see compute_final_target_winrate_table), binned into fixed-width 0.1
-    bins (matching plot_tracking_error_vs_winrate's MAE bins), one colored bar
-    group per Type within each bin, y = win rate with a binomial standard-error
-    whisker and game count labeled above each bar.
-
-    This is the direct answer to "compare win rate at different target levels,
-    within a target type" that plot_tracking_error_vs_winrate can't give - that
-    chart pools every PacingTarget together and bins by tracking *error*, so a
-    Constant-high vs Constant-low difference gets diluted against Linear/Sigmoid
-    games in the same error bin. Here Type is kept as a first-class grouping
-    dimension instead, so e.g. Constant bars at a high value bin can be compared
-    directly against Constant bars at a low one. A dotted reference line at 0.5
-    marks a coin-flip win rate.
-
-    Args:
-        bin_width: Number of 0.1-wide final-target-value bins, i.e. the x-axis
-            spans [0, bin_width * 0.1] (default 10, i.e. the full normalized
-            [0, 1] range). All bins are always drawn (even ones with zero games
-            for a given Type), so the x-axis is identical across all 3 panels and
-            any two runs of this chart.
-
-    Returns:
-        Matplotlib Figure.
+    Draws the 3 (Threat, Tempo, OverallPacing) win-rate-by-Type-and-value panels
+    for one PacingConstraint's worth of games into the given axes row. Factored
+    out of plot_winrate_by_target_type_and_value so that function can repeat this
+    once per PacingConstraint (see its docstring for why constraints can't be
+    pooled) without duplicating the binning/drawing logic per row.
     """
-    bin_edges = np.arange(int(bin_width) + 1) * 0.1
-    table = compute_final_target_winrate_table(df_target_tracking)
-    fig, axes = plt.subplots(1, 3, figsize=(width, height))
-    if table.empty:
-        for ax in axes:
-            ax.text(0.5, 0.5, "No per-game target data to plot.", ha="center", va="center", transform=ax.transAxes)
-        return fig
-
-    types = [t for t in TARGET_TYPE_ORDER if t in table["Type"].unique()]
-    palette = get_theme_color("categorical")
-    type_colors = {t: palette[i % len(palette)] for i, t in enumerate(types)}
-
     metric_cols = {
         "Threat": "FinalThreatTarget", "Tempo": "FinalTempoTarget", "OverallPacing": "FinalOverallPacingTarget",
     }
@@ -1740,10 +1706,11 @@ def plot_winrate_by_target_type_and_value(df_target_tracking, bin_width=10, widt
 
     for ax, metric in zip(axes, ["Threat", "Tempo", "OverallPacing"]):
         col = metric_cols[metric]
-        sub_all = table.dropna(subset=[col])
+        sub_all = sub_table.dropna(subset=[col])
+        title = metric if row_label is None else f"{row_label} — {metric}"
         if sub_all.empty:
             ax.text(0.5, 0.5, "No data.", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(metric, fontsize=12, fontweight="bold")
+            ax.set_title(title, fontsize=11, fontweight="bold")
             continue
 
         # observed=False keeps every bin_edges bin in each Type's grouped result
@@ -1772,44 +1739,120 @@ def plot_winrate_by_target_type_and_value(df_target_tracking, bin_width=10, widt
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=7)
         ax.set_ylim(0, 1.1)
-        ax.set_title(metric, fontsize=12, fontweight="bold")
+        ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(f"Final {metric} Target value bin", fontsize=9)
         ax.set_ylabel("Win Rate", fontsize=9)
         ax.grid(True, axis="y", alpha=0.3, linestyle="--")
         ax.legend(fontsize=7, loc="best")
 
-    fig.suptitle("Win Rate by Target Type and Final Target Value", fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+
+def plot_winrate_by_target_type_and_value(df_target_tracking, bin_width=10, width=15, height=5):
+    """
+    Does win rate depend on where the target curve is actually set, once games are
+    first split by target Type (Constant/Linear/Sigmoid/Step/Other, see
+    _classify_target_type) rather than averaged across every target shape first?
+    One row of 3 panels (Threat, Tempo, OverallPacing) per PacingConstraint: x =
+    that metric's final logged target value (see
+    compute_final_target_winrate_table), binned into fixed-width 0.1 bins
+    (matching plot_tracking_error_vs_winrate's MAE bins), one colored bar group
+    per Type within each bin, y = win rate with a binomial standard-error whisker
+    and game count labeled above each bar.
+
+    This is the direct answer to "compare win rate at different target levels,
+    within a target type" that plot_tracking_error_vs_winrate can't give - that
+    chart pools every PacingTarget together and bins by tracking *error*, so a
+    Constant-high vs Constant-low difference gets diluted against Linear/Sigmoid
+    games in the same error bin. Here Type is kept as a first-class grouping
+    dimension instead, so e.g. Constant bars at a high value bin can be compared
+    directly against Constant bars at a low one.
+
+    Split into one row per PacingConstraint (prod carries avg_bot/top_5/nn - same
+    reasoning as plot_winrate_by_archetype_heatmap: a target's difficulty means
+    something different depending on which constraint normalized it, so pooling
+    constraints together would blend that apart and can make a bot's win rate
+    look erratic/small across target levels for reasons that have nothing to do
+    with the target level itself - it's really a mix of easier/harder constraint
+    games landing in the same bin). A dotted reference line at 0.5 marks a
+    coin-flip win rate.
+
+    Args:
+        bin_width: Number of 0.1-wide final-target-value bins, i.e. the x-axis
+            spans [0, bin_width * 0.1] (default 10, i.e. the full normalized
+            [0, 1] range). All bins are always drawn (even ones with zero games
+            for a given Type), so the x-axis is identical across all rows/panels
+            and any two runs of this chart.
+
+    Returns:
+        Matplotlib Figure.
+    """
+    bin_edges = np.arange(int(bin_width) + 1) * 0.1
+    table = compute_final_target_winrate_table(df_target_tracking)
+    if table.empty:
+        fig, axes = plt.subplots(1, 3, figsize=(width, height))
+        for ax in axes:
+            ax.text(0.5, 0.5, "No per-game target data to plot.", ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    types = [t for t in TARGET_TYPE_ORDER if t in table["Type"].unique()]
+    palette = get_theme_color("categorical")
+    type_colors = {t: palette[i % len(palette)] for i, t in enumerate(types)}
+
+    # None (single unlabeled row) only if PacingConstraint is entirely missing -
+    # otherwise one row per distinct constraint actually present in the data, same
+    # convention as plot_winrate_by_archetype_heatmap.
+    constraints = sorted(c for c in table["PacingConstraint"].dropna().unique())
+    if not constraints:
+        constraints = [None]
+
+    fig, axes_grid = plt.subplots(len(constraints), 3, figsize=(width, height * len(constraints)), squeeze=False)
+    for row_axes, constraint in zip(axes_grid, constraints):
+        sub_table = table if constraint is None else table[table["PacingConstraint"] == constraint]
+        _draw_winrate_by_type_and_value_row(row_axes, sub_table, types, type_colors, bin_edges, row_label=constraint)
+
+    fig.suptitle("Win Rate by Target Type and Final Target Value (per Constraint)", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 1 - 0.05 / len(constraints)])
     return fig
 
 
 def summarize_winrate_by_target_type(df_target_tracking):
     """
     Collapse compute_final_target_winrate_table's one-row-per-game table down to
-    one row per (Bot, Type, PacingTarget) - the compact counterpart for reading as
-    a table instead of the full per-game rows (which run into the hundreds/
-    thousands of rows once every game is listed individually). Since PacingTarget
-    already pins down the actual target level within a Type (e.g. every
-    "default_target_high" game reaches the same Constant level), grouping by
-    PacingTarget directly gives one clean row per level instead of needing another
-    value-bin dimension the way the plot does for its continuous x-axis.
+    one row per (Bot, Type, PacingTarget, PacingConstraint) - the compact
+    counterpart for reading as a table instead of the full per-game rows (which
+    run into the hundreds/thousands of rows once every game is listed
+    individually). Since PacingTarget already pins down the actual target level
+    within a Type (e.g. every "default_target_high" game reaches the same
+    Constant level), grouping by PacingTarget directly gives one clean row per
+    level instead of needing another value-bin dimension the way the plot does
+    for its continuous x-axis.
+
+    PacingConstraint is kept as its own grouping column (not averaged over) for
+    the same reason plot_winrate_by_archetype_heatmap/compute_winrate_by_
+    archetype_table never pool it away: prod carries multiple constraints
+    (avg_bot/top_5/nn) per PacingTarget, each normalizing difficulty differently,
+    so blending them into one WinRate would average away exactly the effect this
+    table exists to show - e.g. a weak bot's win rate can look erratic/small
+    across target levels purely because harder-constraint games are mixed in with
+    easier ones at the same nominal target, not because the target level itself
+    did anything.
 
     Returns:
-        DataFrame with columns Bot, Type, PacingTarget, n_games, WinRate,
-        WinRateSE (binomial standard error), FinalThreatTarget, FinalTempoTarget,
-        FinalOverallPacingTarget (each the mean final target value across that
-        group's games - constant within the group for a Constant target, an
-        average endpoint for Linear/Sigmoid), sorted by Type then
-        FinalOverallPacingTarget so levels read low-to-high within each Type.
+        DataFrame with columns Bot, Type, PacingTarget, PacingConstraint,
+        n_games, WinRate, WinRateSE (binomial standard error), FinalThreatTarget,
+        FinalTempoTarget, FinalOverallPacingTarget (each the mean final target
+        value across that group's games - constant within the group for a
+        Constant target, an average endpoint for Linear/Sigmoid), sorted by Type
+        then FinalOverallPacingTarget so levels read low-to-high within each Type.
     """
     table = compute_final_target_winrate_table(df_target_tracking)
     if table.empty:
         return pd.DataFrame(columns=[
-            "Bot", "Type", "PacingTarget", "n_games", "WinRate", "WinRateSE",
+            "Bot", "Type", "PacingTarget", "PacingConstraint", "n_games", "WinRate", "WinRateSE",
             "FinalThreatTarget", "FinalTempoTarget", "FinalOverallPacingTarget",
         ])
 
-    grouped = table.groupby(["Bot", "Type", "PacingTarget"], dropna=False).agg(
+    group_cols = ["Bot", "Type", "PacingTarget", "PacingConstraint"]
+    grouped = table.groupby(group_cols, dropna=False).agg(
         n_games=("Won", "size"),
         WinRate=("Won", "mean"),
         FinalThreatTarget=("FinalThreatTarget", "mean"),
@@ -1817,8 +1860,7 @@ def summarize_winrate_by_target_type(df_target_tracking):
         FinalOverallPacingTarget=("FinalOverallPacingTarget", "mean"),
     ).reset_index()
     grouped["WinRateSE"] = np.sqrt(grouped["WinRate"] * (1 - grouped["WinRate"]) / grouped["n_games"])
-    grouped = grouped[[
-        "Bot", "Type", "PacingTarget", "n_games", "WinRate", "WinRateSE",
-        "FinalThreatTarget", "FinalTempoTarget", "FinalOverallPacingTarget",
+    grouped = grouped[group_cols + [
+        "n_games", "WinRate", "WinRateSE", "FinalThreatTarget", "FinalTempoTarget", "FinalOverallPacingTarget",
     ]]
-    return grouped.sort_values(["Type", "FinalOverallPacingTarget", "Bot"]).reset_index(drop=True)
+    return grouped.sort_values(["Type", "FinalOverallPacingTarget", "PacingConstraint", "Bot"]).reset_index(drop=True)
