@@ -926,16 +926,58 @@ def plot_overall_bot_metrics(
     return fig
 
 
-def plot_action_radar(df, bot_col="Bot_L", width=14, height=12, scale=None, radial_limit="auto"):
+def _normalize_radar_axes(bot_data, method):
     """
-    Create a radar chart showing mean action counts per bot.
+    Normalize radar values independently per axis across bots.
+
+    method:
+        - "minmax": (v - min) / (max - min) -> lowest bot at 0, highest at 1
+        - "max":    v / max                 -> keeps ratio to the top bot
+        - None:     no normalization
+    """
+    if method is None:
+        return bot_data
+
+    bots = list(bot_data.keys())
+    matrix = np.array([bot_data[b] for b in bots], dtype=float)
+    col_max = matrix.max(axis=0)
+
+    if method == "minmax":
+        col_min = matrix.min(axis=0)
+        span = col_max - col_min
+        normed = np.divide(matrix - col_min, span, out=np.zeros_like(matrix), where=span > 0)
+    elif method == "max":
+        normed = np.divide(matrix, col_max, out=np.zeros_like(matrix), where=col_max > 0)
+    else:
+        raise ValueError(f"Unknown normalize method: {method}")
+
+    return {b: normed[i].tolist() for i, b in enumerate(bots)}
+
+
+def _style_normalized_radar(ax, labels, angles):
+    """Shared paper styling for normalized (0-1) radar charts."""
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=14)
+    ax.tick_params(axis='x', pad=12)
+    ax.set_ylim(0, 1.0)
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.set_yticklabels(["0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=11)
+    ax.set_rlabel_position(22.5)
+    ax.grid(True, linestyle='-', linewidth=0.8, alpha=0.6)
+
+
+def plot_action_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, radial_limit="auto",
+                      normalize="minmax"):
+    """
+    Create a radar chart showing mean action counts per game per bot.
 
     Parameters:
-        scale (str): Scale for radial axis (None = linear, "sqrt", "log")
-        radial_limit (str or float):
+        scale (str): Scale applied before normalization (None = linear, "sqrt", "log")
+        radial_limit (str or float): Only used when normalize=None
                     - "auto": Set max based on 95th percentile (recommended for better spacing)
                     - "max": Use the absolute max value
                     - float: Manually set the max radial value
+        normalize (str): Per-axis normalization across bots ("minmax", "max", or None for raw)
     """
     # Get all action columns
     action_cols = [col for col in df.columns if col.endswith("_Act_L")]
@@ -954,8 +996,13 @@ def plot_action_radar(df, bot_col="Bot_L", width=14, height=12, scale=None, radi
     bot_data_raw = {}
     action_names = []
 
+    # Per-game rates so configs with different game counts weigh equally
+    per_game = df.copy()
+    for col in action_cols:
+        per_game[col] = per_game[col] / per_game["Games"]
+
     for bot in bots:
-        bot_df = df[df[bot_col] == bot]
+        bot_df = per_game[per_game[bot_col] == bot]
         means = []
 
         # Build action list on first iteration
@@ -1000,6 +1047,8 @@ def plot_action_radar(df, bot_col="Bot_L", width=14, height=12, scale=None, radi
         else:  # linear / None
             bot_data[bot] = values
 
+    bot_data = _normalize_radar_axes(bot_data, normalize)
+
     # Set up radar chart
     num_vars = len(action_names)
     angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
@@ -1020,9 +1069,20 @@ def plot_action_radar(df, bot_col="Bot_L", width=14, height=12, scale=None, radi
         # Use bot-specific marker, color, and rank-based linestyle
         marker = get_bot_marker(bot)
         color = get_bot_color(bot)
-        linestyle = get_bot_linestyle(rank) if rank is not None else "-"
-        ax.plot(angles, values, marker=marker, linestyle=linestyle, linewidth=2.5, markersize=8,
-                label=label, color=color)
+        if normalize:
+            ax.plot(angles, values, marker=marker, linestyle="-", linewidth=2.5, markersize=7,
+                    label=label, color=color)
+        else:
+            linestyle = get_bot_linestyle(rank) if rank is not None else "-"
+            ax.plot(angles, values, marker=marker, linestyle=linestyle, linewidth=2.5, markersize=8,
+                    label=label, color=color)
+
+    if normalize:
+        _style_normalized_radar(ax, action_names, angles)
+        ax.set_title('Normalized Actions Behaviour', size=20, pad=30, fontweight='bold')
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=12, framealpha=0.9, ncol=2)
+        fig.tight_layout()
+        return fig
 
     # Set labels with better styling
     ax.set_xticks(angles[:-1])
@@ -1060,16 +1120,18 @@ def plot_action_radar(df, bot_col="Bot_L", width=14, height=12, scale=None, radi
     return fig
 
 
-def plot_collision_radar(df, bot_col="Bot_L", width=14, height=12, scale=None):
+def plot_collision_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, normalize="minmax"):
     """
     Create a triangular radar chart showing collision outcomes per bot.
     Three axes: hit (wins), tie (draws), being_hit (losses)
 
     Parameters:
-        scale (str): Scale for radial axis. Options:
+        scale (str): Scale applied before normalization. Options:
                     - "linear": Raw values
                     - "sqrt": Square root scale (recommended - shows all values clearly)
                     - "log": Logarithmic scale (more aggressive compression)
+        normalize (str): Per-axis normalization across bots ("minmax", "max", or None for raw).
+                    When set, values are mean collisions per game instead of raw totals.
     """
     # Get unique bots and sort by rank
     rank_col = "Rank_L" if bot_col == "Bot_L" else "Rank_R"
@@ -1086,10 +1148,16 @@ def plot_collision_radar(df, bot_col="Bot_L", width=14, height=12, scale=None):
         # Get data for this bot on left side
         left_df = df[df[bot_col] == bot]
 
-        # Calculate totals (raw counts)
-        hit = left_df["Collisions_L"].sum()
-        being_hit = left_df["Collisions_R"].sum()
-        ties = left_df["Collisions_Tie"].sum()
+        if normalize:
+            # Mean per game, so bots with more config rows aren't inflated
+            hit = (left_df["Collisions_L"] / left_df["Games"]).mean()
+            being_hit = (left_df["Collisions_R"] / left_df["Games"]).mean()
+            ties = (left_df["Collisions_Tie"] / left_df["Games"]).mean()
+        else:
+            # Calculate totals (raw counts)
+            hit = left_df["Collisions_L"].sum()
+            being_hit = left_df["Collisions_R"].sum()
+            ties = left_df["Collisions_Tie"].sum()
 
         # Store as a list: [hit, tie, being_hit]
         bot_data_raw[bot] = [hit, ties, being_hit]
@@ -1103,6 +1171,8 @@ def plot_collision_radar(df, bot_col="Bot_L", width=14, height=12, scale=None):
             bot_data[bot] = [np.log10(v + 1) for v in values]  # +1 to handle zeros
         else:  # linear
             bot_data[bot] = values
+
+    bot_data = _normalize_radar_axes(bot_data, normalize)
 
     # Set up triangular radar chart (3 vertices)
     collision_types = ['hit', 'tie', 'struck']
@@ -1125,9 +1195,20 @@ def plot_collision_radar(df, bot_col="Bot_L", width=14, height=12, scale=None):
         # Use bot-specific marker, color, and rank-based linestyle
         marker = get_bot_marker(bot)
         color = get_bot_color(bot)
-        linestyle = get_bot_linestyle(rank) if rank is not None else "-"
-        ax.plot(angles, values, marker=marker, linestyle=linestyle, linewidth=2.5, markersize=8,
-                label=label, color=color)
+        if normalize:
+            ax.plot(angles, values, marker=marker, linestyle="-", linewidth=2.5, markersize=7,
+                    label=label, color=color)
+        else:
+            linestyle = get_bot_linestyle(rank) if rank is not None else "-"
+            ax.plot(angles, values, marker=marker, linestyle=linestyle, linewidth=2.5, markersize=8,
+                    label=label, color=color)
+
+    if normalize:
+        _style_normalized_radar(ax, collision_types, angles)
+        ax.set_title('Normalized Collision Behaviour', size=20, pad=30, fontweight='bold')
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=12, framealpha=0.9, ncol=2)
+        fig.tight_layout()
+        return fig
 
     # Set labels with better styling
     ax.set_xticks(angles[:-1])
