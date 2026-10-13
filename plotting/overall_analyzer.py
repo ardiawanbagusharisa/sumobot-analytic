@@ -959,6 +959,10 @@ def _style_normalized_radar(ax, labels, angles):
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, fontsize=14)
     ax.tick_params(axis='x', pad=12)
+    # Anchor each label on the edge facing the circle so side labels don't overlap the ring
+    for label, angle in zip(ax.get_xticklabels(), angles[:-1]):
+        cos = np.cos(angle)
+        label.set_horizontalalignment('left' if cos > 0.1 else 'right' if cos < -0.1 else 'center')
     ax.set_ylim(0, 1.0)
     ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
     ax.set_yticklabels(["0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=11)
@@ -1079,7 +1083,7 @@ def plot_action_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, radi
 
     if normalize:
         _style_normalized_radar(ax, action_names, angles)
-        ax.set_title('Normalized Actions Behaviour', size=20, pad=30, fontweight='bold')
+        ax.set_title('Actions Behaviour', size=20, pad=30, fontweight='bold')
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=12, framealpha=0.9, ncol=2)
         fig.tight_layout()
         return fig
@@ -1175,7 +1179,7 @@ def plot_collision_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, n
     bot_data = _normalize_radar_axes(bot_data, normalize)
 
     # Set up triangular radar chart (3 vertices)
-    collision_types = ['hit', 'tie', 'struck']
+    collision_types = ['Hit', 'Tie', 'Struck']
     num_vars = len(collision_types)
     angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
     angles += angles[:1]  # Complete the circle
@@ -1205,7 +1209,7 @@ def plot_collision_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, n
 
     if normalize:
         _style_normalized_radar(ax, collision_types, angles)
-        ax.set_title('Normalized Collision Behaviour', size=20, pad=30, fontweight='bold')
+        ax.set_title('Collision Behaviour', size=20, pad=30, fontweight='bold')
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=12, framealpha=0.9, ncol=2)
         fig.tight_layout()
         return fig
