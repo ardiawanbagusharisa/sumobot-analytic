@@ -970,7 +970,31 @@ def _style_normalized_radar(ax, labels, angles):
     ax.grid(True, linestyle='-', linewidth=0.8, alpha=0.6)
 
 
-def plot_action_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, radial_limit="auto",
+def _rank_layer_style(position, n_bots, min_alpha=0.3):
+    """
+    Alpha and zorder for the bot at `position` in rank order (0 = Rank 1).
+    Rank 1 is drawn on top and fully opaque; lower ranks fade towards min_alpha.
+    """
+    alpha = 1.0 if n_bots <= 1 else 1.0 - (1.0 - min_alpha) * position / (n_bots - 1)
+    zorder = 3 + (n_bots - position)
+    return alpha, zorder
+
+
+def _add_ranked_legend(ax, max_cols=5, fontsize=12):
+    """Wide legend below the chart, read left-to-right in rank order."""
+    handles, labels = ax.get_legend_handles_labels()
+    n = len(handles)
+    ncol = max(1, min(n, max_cols))
+    # Matplotlib fills legend columns top-to-bottom; reorder so rows read in rank order
+    nrows, num_largecol = divmod(n, ncol)
+    rows_per_col = [nrows + 1] * num_largecol + [nrows] * (ncol - num_largecol)
+    order = [row * ncol + col for col in range(ncol) for row in range(rows_per_col[col])]
+    ax.legend([handles[i] for i in order], [labels[i] for i in order],
+              loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=fontsize,
+              framealpha=0.9, ncol=ncol, columnspacing=1.5, handlelength=2.5)
+
+
+def plot_action_radar(df, bot_col="Bot_L", width=14, height=11,scale=None, radial_limit="auto",
                       normalize="minmax"):
     """
     Create a radar chart showing mean action counts per game per bot.
@@ -1060,9 +1084,10 @@ def plot_action_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, radi
 
     fig, ax = plt.subplots(figsize=(width, height), subplot_kw=dict(projection='polar'))
 
-    # Plot each bot
-    for bot, values in bot_data.items():
+    # Plot each bot (bot_data is in rank order; Rank 1 on top and most opaque)
+    for position, (bot, values) in enumerate(bot_data.items()):
         values += values[:1]  # Complete the circle
+        alpha, zorder = _rank_layer_style(position, len(bot_data))
         # Format label with rank if available
         rank = None
         if rank_map and bot in rank_map:
@@ -1075,16 +1100,16 @@ def plot_action_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, radi
         color = get_bot_color(bot)
         if normalize:
             ax.plot(angles, values, marker=marker, linestyle="-", linewidth=2.5, markersize=7,
-                    label=label, color=color)
+                    label=label, color=color, alpha=alpha, zorder=zorder)
         else:
             linestyle = get_bot_linestyle(rank) if rank is not None else "-"
             ax.plot(angles, values, marker=marker, linestyle=linestyle, linewidth=2.5, markersize=8,
-                    label=label, color=color)
+                    label=label, color=color, alpha=alpha, zorder=zorder)
 
     if normalize:
         _style_normalized_radar(ax, action_names, angles)
         ax.set_title('Actions Behaviour', size=20, pad=30, fontweight='bold')
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=12, framealpha=0.9, ncol=2)
+        _add_ranked_legend(ax)
         fig.tight_layout()
         return fig
 
@@ -1124,7 +1149,7 @@ def plot_action_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, radi
     return fig
 
 
-def plot_collision_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, normalize="minmax"):
+def plot_collision_radar(df, bot_col="Bot_L", width=14, height=11,scale=None, normalize="minmax"):
     """
     Create a triangular radar chart showing collision outcomes per bot.
     Three axes: hit (wins), tie (draws), being_hit (losses)
@@ -1186,9 +1211,10 @@ def plot_collision_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, n
 
     fig, ax = plt.subplots(figsize=(width, height), subplot_kw=dict(projection='polar'))
 
-    # Plot each bot
-    for bot, values in bot_data.items():
+    # Plot each bot (bot_data is in rank order; Rank 1 on top and most opaque)
+    for position, (bot, values) in enumerate(bot_data.items()):
         values += values[:1]  # Complete the circle
+        alpha, zorder = _rank_layer_style(position, len(bot_data))
         # Format label with rank if available
         rank = None
         if rank_map and bot in rank_map:
@@ -1201,16 +1227,16 @@ def plot_collision_radar(df, bot_col="Bot_L", width=10, height=11, scale=None, n
         color = get_bot_color(bot)
         if normalize:
             ax.plot(angles, values, marker=marker, linestyle="-", linewidth=2.5, markersize=7,
-                    label=label, color=color)
+                    label=label, color=color, alpha=alpha, zorder=zorder)
         else:
             linestyle = get_bot_linestyle(rank) if rank is not None else "-"
             ax.plot(angles, values, marker=marker, linestyle=linestyle, linewidth=2.5, markersize=8,
-                    label=label, color=color)
+                    label=label, color=color, alpha=alpha, zorder=zorder)
 
     if normalize:
         _style_normalized_radar(ax, collision_types, angles)
         ax.set_title('Collision Behaviour', size=20, pad=30, fontweight='bold')
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.08), fontsize=12, framealpha=0.9, ncol=2)
+        _add_ranked_legend(ax)
         fig.tight_layout()
         return fig
 
