@@ -478,13 +478,9 @@ def plot_action_timebins_intensity(
         ax.set_ylabel("Mean Count")
         legend_title = "Bot (Rank)" if (group_by == "Bot" and rank_map is not None) else group_by
 
-        # Calculate dynamic padding for legend
-        legend_padding = calculate_legend_padding(ax, rotation=0)
-        ax.legend(title=legend_title, loc='upper center', bbox_to_anchor=(0.5, legend_padding), ncol=3,
-                 framealpha=0.9, markerscale=1.2)
         ax.grid(True, alpha=0.3)
         apply_timer_xlim(ax)
-        fig.tight_layout()
+        _place_wide_bot_legend(fig, ax, title=legend_title)
         return fig
 
     elif mode == "total":
@@ -497,13 +493,9 @@ def plot_action_timebins_intensity(
         ax.set_ylabel("Mean Count (summed over actions)")
         legend_title = "Bot (Rank)" if (group_by == "Bot" and rank_map is not None) else group_by
 
-        # Calculate dynamic padding for legend
-        legend_padding = calculate_legend_padding(ax, rotation=0)
-        ax.legend(title=legend_title, loc='upper center', bbox_to_anchor=(0.5, legend_padding), ncol=3,
-                 framealpha=0.9, markerscale=1.2)
         ax.grid(True, alpha=0.3)
         apply_timer_xlim(ax)
-        fig.tight_layout()
+        _place_wide_bot_legend(fig, ax, title=legend_title)
         return fig
 
     elif mode == "per_action":
@@ -1265,6 +1257,82 @@ def plot_collision_radar(df, bot_col="Bot_L", width=14, height=11,scale=None, no
     return fig
 
 
+# Font sizes for the stacked distribution charts. Sized so text stays legible
+# when a 10in-wide figure is scaled down to a half-page subfigure in a
+# two-column IEEE layout (~3.5in wide).
+STACKED_FONT = {
+    'title': 18,
+    'label': 16,
+    'tick': 14,
+    'legend': 14,
+}
+
+
+def _style_stacked_axes(ax, xlabel, ylabel, title, n_bots):
+    """Apply the shared axis styling for the stacked distribution charts."""
+    ax.set_xlabel(xlabel, fontsize=STACKED_FONT['label'], fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=STACKED_FONT['label'], fontweight='bold')
+    ax.set_title(title, fontsize=STACKED_FONT['title'], fontweight='bold', pad=12)
+    ax.tick_params(axis='both', labelsize=STACKED_FONT['tick'])
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    ax.set_axisbelow(True)
+
+    # Rotate x-axis labels if many bots
+    if n_bots > 5:
+        plt.setp(ax.get_xticklabels(), rotation=30, ha='right',
+                 rotation_mode='anchor')
+
+
+def _place_bottom_legend(fig, ax, ncol, pad=0.01, expand=False, handles=None,
+                         labels=None, **legend_kwargs):
+    """
+    Put the legend at the bottom of the figure and reserve exactly enough space
+    for it, so it never overlaps the x tick labels or x-axis label.
+
+    expand=True stretches the legend horizontally to span the axes' full width
+    (left spine to right spine) instead of centering it at its natural width.
+    """
+    if handles is None or labels is None:
+        handles, labels = ax.get_legend_handles_labels()
+    if ax.get_legend() is not None:
+        ax.get_legend().remove()
+
+    kwargs = dict(fontsize=STACKED_FONT['legend'], frameon=False,
+                  handlelength=1.5, columnspacing=1.5)
+    kwargs.update(legend_kwargs)
+
+    if expand:
+        # Span the full figure first just to measure height; realigned below.
+        legend = fig.legend(handles, labels, loc='lower left',
+                            bbox_to_anchor=(0.0, 0.0, 1.0, 0.0),
+                            mode='expand', ncol=ncol, **kwargs)
+    else:
+        legend = fig.legend(handles, labels, loc='lower center',
+                            bbox_to_anchor=(0.5, 0.0), ncol=ncol, **kwargs)
+
+    # Measure the legend height in figure coordinates, then lay out the axes
+    # (including rotated tick labels and the x label) above it.
+    fig.canvas.draw()
+    legend_h = legend.get_window_extent().height / fig.bbox.height
+    fig.tight_layout(rect=(0, legend_h + pad, 1, 1))
+
+    if expand:
+        # Align the stretched legend with the final axes area.
+        pos = ax.get_position()
+        legend.set_bbox_to_anchor((pos.x0, 0.0, pos.width, 0.0),
+                                  transform=fig.transFigure)
+    return legend
+
+
+def _place_wide_bot_legend(fig, ax, title, ncol=3, handles=None, labels=None):
+    """Full-width bottom legend for the bot line charts (intensity over time)."""
+    return _place_bottom_legend(fig, ax, ncol=ncol, expand=True, title=title,
+                                handles=handles, labels=labels,
+                                fontsize=None, frameon=True, framealpha=0.9,
+                                markerscale=1.2, handlelength=None,
+                                columnspacing=None)
+
+
 def plot_action_distribution_stacked(df, bot_col="Bot_L", width=10, height=6, normalize=False):
     """
     Create a stacked bar chart showing action type distribution per bot.
@@ -1346,28 +1414,16 @@ def plot_action_distribution_stacked(df, bot_col="Bot_L", width=10, height=6, no
     # Customize plot
     ax.set_xticks(x_pos)
     ax.set_xticklabels(bot_labels)
-    ax.set_xlabel('Bots', fontsize=12, fontweight='bold')
 
     if normalize:
-        ax.set_ylabel('Action Distribution (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Action Type Distribution per Bot (Normalized)',
-                     fontsize=14, fontweight='bold', pad=15)
         ax.set_ylim(0, 100)
+        _style_stacked_axes(ax, 'Bots', 'Action Distribution (%)',
+                            'Action Type Distribution per Bot (Normalized)', len(bots))
     else:
-        ax.set_ylabel('Total Action Count', fontsize=12, fontweight='bold')
-        ax.set_title('Action Type Distribution per Bot',
-                     fontsize=14, fontweight='bold', pad=15)
-        
-    legend_padding = calculate_legend_padding(ax, rotation=0)
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, legend_padding), ncol=5,
-              fontsize=10, framealpha=0.9)
-    ax.grid(axis='y', linestyle='--', alpha=0.3)
+        _style_stacked_axes(ax, 'Bots', 'Total Action Count',
+                            'Action Type Distribution per Bot', len(bots))
 
-    # Rotate x-axis labels if many bots
-    if len(bots) > 5:
-        plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-
-    fig.tight_layout()
+    _place_bottom_legend(fig, ax, ncol=5)
     return fig
 
 
@@ -1448,28 +1504,16 @@ def plot_collision_distribution_stacked(df, bot_col="Bot_L", width=10, height=6,
     # Customize plot
     ax.set_xticks(x_pos)
     ax.set_xticklabels(bot_labels)
-    ax.set_xlabel('Bots', fontsize=12, fontweight='bold')
 
     if normalize:
-        ax.set_ylabel('Collision Distribution (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Collision Type Distribution per Bot (Normalized)',
-                     fontsize=14, fontweight='bold', pad=15)
         ax.set_ylim(0, 100)
+        _style_stacked_axes(ax, 'Bots', 'Collision Distribution (%)',
+                            'Collision Type Distribution per Bot (Normalized)', len(bots))
     else:
-        ax.set_ylabel('Total Collision Count', fontsize=12, fontweight='bold')
-        ax.set_title('Collision Type Distribution per Bot',
-                     fontsize=14, fontweight='bold', pad=15)
-        
-    legend_padding = calculate_legend_padding(ax, rotation=0)
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, legend_padding), ncol=3,
-              fontsize=10, framealpha=0.9)
-    ax.grid(axis='y', linestyle='--', alpha=0.3)
+        _style_stacked_axes(ax, 'Bots', 'Total Collision Count',
+                            'Collision Type Distribution per Bot', len(bots))
 
-    # Rotate x-axis labels if many bots
-    if len(bots) > 5:
-        plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-
-    fig.tight_layout()
+    _place_bottom_legend(fig, ax, ncol=3)
     return fig
 
 
@@ -1811,6 +1855,233 @@ def plot_pacing_factors_per_bot_summary(
         return wide_summary_df, figures
     else:
         return summary_df, figures, detailed_stats
+
+
+# ===== Pacing across bots by constraint (grid) =====
+
+# Same colors as plot_pacing_factors_per_bot_summary ('blue'/'red'/'green' at
+# alpha 0.8 on white), so the grid matches the per-bot charts.
+PACING_FACTOR_COLORS = {
+    'Tempo': '#3333ff',
+    'Threat': '#ff3333',
+    'Average': '#339933',
+}
+
+# Default constraint runs (pacing_runs names) -> (legend label, linestyle).
+PACING_CONSTRAINT_STYLES = {
+    'nn_pacing': ('Top (NN)', '-'),
+    'top5_avg_pacing': ('Top-5', (0, (5, 2.5))),
+    'bot_avg_pacing': ('Avg.', (0, (0.8, 2))),
+}
+
+_PACING_THREAT_FACTORS = ['CollisionRatio', 'AbilityRatio', 'Angle', 'SafeDistance']
+_PACING_TEMPO_FACTORS = ['ActionIntensity', 'ActionDensity', 'BotsDistance', 'Velocity']
+
+
+def compute_pacing_curves(df):
+    """
+    Tempo / Threat / Average curve per bot from a summary_pacing_per_bot_{bin}.csv
+    DataFrame. Same calculation as plot_pacing_factors_per_bot_summary with
+    normalize_values=False: rows are averaged per TimeBin (across Timer configs),
+    Tempo = nanmean of the tempo factors' *_mean, Threat = nanmean of the threat
+    factors' *_mean, Average = (Tempo + Threat) / 2.
+
+    Returns:
+        {bot: DataFrame[TimeBin, Tempo, Threat, Average]}
+    """
+    curves = {}
+    for bot in df['Bot'].unique():
+        bot_df = (df[df['Bot'] == bot]
+                  .groupby('TimeBin', as_index=False).mean(numeric_only=True)
+                  .sort_values('TimeBin'))
+        if bot_df.empty:
+            continue
+
+        def factor_mean(factors):
+            cols = [f'{f}_mean' for f in factors if f'{f}_mean' in bot_df.columns]
+            if not cols:
+                return np.zeros(len(bot_df))
+            return np.nanmean(bot_df[cols].to_numpy(dtype=float), axis=1)
+
+        tempo = factor_mean(_PACING_TEMPO_FACTORS)
+        threat = factor_mean(_PACING_THREAT_FACTORS)
+        curves[bot] = pd.DataFrame({
+            'TimeBin': bot_df['TimeBin'].to_numpy(),
+            'Tempo': tempo,
+            'Threat': threat,
+            'Average': (tempo + threat) / 2,
+        })
+    return curves
+
+
+def _mean_pacing_curve(curves, bots):
+    """Equal-weight mean of several bots' curves on the TimeBins they all share."""
+    frames = [curves[b].set_index('TimeBin') for b in bots if b in curves]
+    if not frames:
+        return None
+    common = frames[0].index
+    for frame in frames[1:]:
+        common = common.intersection(frame.index)
+    if len(common) == 0:
+        return None
+    stacked = np.stack([f.loc[common, ['Tempo', 'Threat', 'Average']].to_numpy() for f in frames])
+    mean = stacked.mean(axis=0)
+    return pd.DataFrame({'TimeBin': np.asarray(common), 'Tempo': mean[:, 0],
+                         'Threat': mean[:, 1], 'Average': mean[:, 2]})
+
+
+def plot_pacing_constraints_grid(
+    pacing_by_constraint,
+    rank_df=None,
+    constraint_styles=None,
+    top_k=3,
+    include_all=True,
+    ncols=3,
+    column_major=True,
+    ylim=None,
+    title=None,
+    fig_width=7.16,
+    panel_height=1.45,
+    base_fontsize=7,
+):
+    """
+    Grid of per-bot pacing charts: color = factor (Tempo / Threat / Average),
+    line style = constraint run (e.g. Top (NN) / Top-5 / Avg.). Bots are ordered
+    by rank; the leftover grid slots get a "Top-k" panel and an "All bots" panel
+    (equal-weight mean of the bots' curves for each constraint).
+
+    Replaces the image-digitizing pipeline in combine_pacing_constraints.py: the
+    curves are computed straight from the pacing summaries, so values are exact.
+
+    Args:
+        pacing_by_constraint: {run_name: summary_pacing_per_bot DataFrame}, e.g.
+            {name: df_pacing_bots[name][dur] for name in pacing_runs}.
+        rank_df: summary_bot.csv DataFrame with Rank/Bot (orders panels, adds "#k").
+            Without it bots are ordered alphabetically and no ranks are shown.
+        constraint_styles: {run_name: (label, linestyle)}; default
+            PACING_CONSTRAINT_STYLES. Runs not listed here get an automatic style.
+        top_k: Size of the "Top-k" aggregate panel (0/None to skip; needs rank_df).
+        include_all: Add the "All bots" aggregate panel.
+        ncols: Grid columns.
+        column_major: Fill ranks down each column first (#1-#5 in column 1, ...),
+            as in the original figure.
+        ylim: (low, high) shared y-range; default = data range rounded out to 0.05.
+        title: Optional figure title.
+        fig_width: Figure width in inches (default = IEEE full text width).
+        panel_height: Height of one grid row in inches.
+        base_fontsize: Font size in points at print size.
+
+    Returns:
+        matplotlib figure
+    """
+    from matplotlib.lines import Line2D
+
+    constraint_styles = dict(constraint_styles or PACING_CONSTRAINT_STYLES)
+    fallback_styles = ['-', (0, (5, 2.5)), (0, (0.8, 2)), (0, (5, 2, 1, 2))]
+    runs = [name for name in pacing_by_constraint if pacing_by_constraint[name] is not None]
+    if not runs:
+        raise ValueError("pacing_by_constraint is empty")
+    # Keep the canonical order (NN, Top-5, Avg.) when those runs are present.
+    runs.sort(key=lambda n: list(constraint_styles).index(n) if n in constraint_styles else 99)
+    for i, name in enumerate(runs):
+        if name not in constraint_styles:
+            constraint_styles[name] = (name, fallback_styles[i % len(fallback_styles)])
+
+    curves_by_run = {name: compute_pacing_curves(pacing_by_constraint[name]) for name in runs}
+    all_bots = sorted(set().union(*[set(c) for c in curves_by_run.values()]))
+
+    rank_map = {}
+    if rank_df is not None:
+        rank_map = {b: int(r) for b, r in zip(rank_df['Bot'], rank_df['Rank'])}
+    bots = sorted(all_bots, key=lambda b: (rank_map.get(b, 10**6), b))
+
+    # Panels: one per bot, then the aggregates.
+    panels = [(f"#{rank_map[b]} {b}" if b in rank_map else b, [b], False) for b in bots]
+    if top_k and rank_map:
+        top_bots = [b for b in bots if b in rank_map][:top_k]
+        panels.append((f"Top {len(top_bots)} (mean of #1–#{len(top_bots)})", top_bots, True))
+    if include_all:
+        panels.append((f"All bots (mean of {len(bots)})", bots, True))
+
+    n_panels = len(panels)
+    nrows = int(np.ceil(n_panels / ncols))
+    slots = ([(i % nrows, i // nrows) for i in range(n_panels)] if column_major
+             else [(i // ncols, i % ncols) for i in range(n_panels)])
+
+    # Resolve every panel's curves first, so the shared y-range covers all of them.
+    panel_curves = []
+    for label, members, is_group in panels:
+        per_run = {}
+        for name in runs:
+            curves = curves_by_run[name]
+            curve = _mean_pacing_curve(curves, members) if is_group else curves.get(members[0])
+            if curve is not None:
+                per_run[name] = curve
+        panel_curves.append(per_run)
+
+    if ylim is None:
+        values = np.concatenate([c[['Tempo', 'Threat', 'Average']].to_numpy().ravel()
+                                 for per_run in panel_curves for c in per_run.values()])
+        values = values[np.isfinite(values)]
+        step = 0.05
+        ylim = (np.floor(values.min() / step) * step, np.ceil(values.max() / step) * step)
+
+    x_max = max(c['TimeBin'].max() for per_run in panel_curves for c in per_run.values())
+
+    legend_band = 0.3
+    fig_height = panel_height * nrows + 0.35 + legend_band + (0.2 if title else 0)
+    fig = plt.figure(figsize=(fig_width, fig_height), layout='constrained')
+    # Separate strip for the legend so it never collides with "Time (s)".
+    sf_main, sf_legend = fig.subfigures(2, 1, height_ratios=[fig_height - legend_band, legend_band])
+    axes = sf_main.subplots(nrows, ncols, sharex=True, sharey=True, squeeze=False)
+
+    used = set()
+    for (label, _, is_group), per_run, (r, c) in zip(panels, panel_curves, slots):
+        ax = axes[r, c]
+        used.add((r, c))
+        if is_group:
+            ax.set_facecolor('#f4f4f4')
+        for name in runs:
+            curve = per_run.get(name)
+            if curve is None:
+                continue
+            _, linestyle = constraint_styles[name]
+            for factor, color in PACING_FACTOR_COLORS.items():
+                ax.plot(curve['TimeBin'], curve[factor], color=color,
+                        linestyle=linestyle, linewidth=0.9)
+        ax.set_title(label, fontsize=base_fontsize, fontweight='bold', pad=2)
+        ax.grid(True, alpha=0.3, linewidth=0.4)
+        ax.tick_params(labelsize=base_fontsize - 1, length=2, pad=1.5)
+
+    for r in range(nrows):
+        for c in range(ncols):
+            if (r, c) not in used:
+                axes[r, c].set_visible(False)
+
+    # sharex hides x tick labels on all but the bottom row; re-enable them on the
+    # lowest visible panel of each column (a column can end early).
+    for c in range(ncols):
+        rows_used = [r for (r, cc) in used if cc == c]
+        if rows_used:
+            axes[max(rows_used), c].tick_params(labelbottom=True)
+
+    axes[0, 0].set_xlim(0, x_max)
+    axes[0, 0].set_ylim(*ylim)
+    sf_main.supxlabel('Time (s)', fontsize=base_fontsize + 1)
+    sf_main.supylabel('Pacing', fontsize=base_fontsize + 1)
+
+    factor_handles = [Line2D([], [], color=col, linewidth=1.4, label=f)
+                      for f, col in PACING_FACTOR_COLORS.items()]
+    constraint_handles = [Line2D([], [], color='#333333', linewidth=1.2,
+                                 linestyle=constraint_styles[n][1], label=constraint_styles[n][0])
+                          for n in runs]
+    handles = factor_handles + constraint_handles
+    sf_legend.legend(handles=handles, labels=[h.get_label() for h in handles],
+                     loc='center', ncol=len(handles), frameon=False,
+                     fontsize=base_fontsize, handlelength=2.6, columnspacing=1.4)
+    if title:
+        sf_main.suptitle(title, fontsize=base_fontsize + 2, fontweight='bold')
+    return fig
 
 
 def plot_pacing_factors_per_bot(
@@ -2165,13 +2436,9 @@ def plot_collision_timebins_intensity(
         ax.set_ylabel("Mean Count")
         legend_title = "Bot (Rank)" if (group_by in ["Bot_L", "Bot_R"] and rank_map is not None) else group_by
 
-        # Calculate dynamic padding for legend
-        legend_padding = calculate_legend_padding(ax, rotation=0)
-        ax.legend(title=legend_title, loc='upper center', bbox_to_anchor=(0.5, legend_padding), ncol=3,
-                 framealpha=0.9, markerscale=1.2)
         ax.grid(True, alpha=0.3)
         apply_timer_xlim(ax)
-        fig.tight_layout()
+        _place_wide_bot_legend(fig, ax, title=legend_title)
         return fig
 
     elif mode == "total":
@@ -2187,13 +2454,9 @@ def plot_collision_timebins_intensity(
         ax.set_ylabel("Mean Count (summed over collision types)")
         legend_title = "Bot (Rank)" if (group_by in ["Bot_L", "Bot_R"] and rank_map is not None) else group_by
 
-        # Calculate dynamic padding for legend
-        legend_padding = calculate_legend_padding(ax, rotation=0)
-        ax.legend(title=legend_title, loc='upper center', bbox_to_anchor=(0.5, legend_padding), ncol=3,
-                 framealpha=0.9, markerscale=1.2)
         ax.grid(True, alpha=0.3)
         apply_timer_xlim(ax)
-        fig.tight_layout()
+        _place_wide_bot_legend(fig, ax, title=legend_title)
         return fig
 
     elif mode == "per_type":
@@ -2311,8 +2574,71 @@ def prepare_correlation_data(df):
     return df_combined
 
 
+def _mean_ci95(values):
+    """Return (mean, half-width of the t-based 95% CI) for a 1-D array."""
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    mean = values.mean()
+    if n < 2:
+        return mean, 0.0
+    sem = values.std(ddof=1) / np.sqrt(n)
+    return mean, stats.t.ppf(0.975, n - 1) * sem
+
+
+def _plot_bot_mean_ci(ax, plot_data, x_col, y_col, color_by, unique_values,
+                      rank_map, dodge_frac=0.3):
+    """
+    Draw each bot's mean +/- 95% CI at every discrete x value, dodged
+    horizontally so bots never overlap, and connect each bot's means.
+
+    dodge_frac: fraction of the smallest gap between x values that the whole
+                group of bots spreads across.
+    """
+    x_levels = np.sort(plot_data[x_col].unique())
+    min_gap = np.diff(x_levels).min() if len(x_levels) > 1 else 1.0
+    n_groups = len(unique_values)
+    spread = min_gap * dodge_frac
+    offsets = (np.linspace(-spread / 2, spread / 2, n_groups)
+               if n_groups > 1 else np.zeros(1))
+
+    for idx, value in enumerate(unique_values):
+        sub = plot_data[plot_data[color_by] == value]
+        if sub.empty:
+            continue
+
+        marker = get_bot_marker(value) if color_by == 'Bot' else 'o'
+        color = get_bot_color(value) if color_by == 'Bot' else plt.cm.tab10(idx / n_groups)
+        if rank_map and value in rank_map:
+            label = f"{value} (#{int(rank_map[value])})"
+        else:
+            label = value
+
+        xs, means, cis = [], [], []
+        for x in x_levels:
+            y = sub.loc[sub[x_col] == x, y_col].values
+            if len(y) == 0:
+                continue
+            m, ci = _mean_ci95(y)
+            xs.append(x + offsets[idx])
+            means.append(m)
+            cis.append(ci)
+
+        ax.plot(xs, means, '-', color=color, linewidth=1.5, alpha=0.6, zorder=2)
+        ax.errorbar(xs, means, yerr=cis, fmt=marker, color=color,
+                    markersize=8, markeredgecolor='black', markeredgewidth=0.6,
+                    ecolor=color, elinewidth=1.5, capsize=3, label=label,
+                    zorder=3)
+
+    # Tick only at the actual config values (the axis is discrete).
+    ax.set_xticks(x_levels)
+    ax.set_xticklabels([f"{x:g}" for x in x_levels])
+    pad = min_gap * 0.5
+    ax.set_xlim(x_levels.min() - pad, x_levels.max() + pad)
+
+
 def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
-                            alpha=0.95, figsize=(10, 8), add_per_bot_regression=False):
+                            alpha=0.95, figsize=(10, 8), add_per_bot_regression=False,
+                            style='scatter'):
     """
     Create scatter plot with regression line and Pearson correlation.
 
@@ -2325,10 +2651,17 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
         alpha: Transparency of scatter points
         figsize: Figure size tuple
         add_per_bot_regression: If True, add regression line for each bot
+                                (scatter style only)
+        style: 'scatter' plots every raw point.
+               'mean_ci' plots each bot's mean +/- 95% CI per x value, dodged
+               so bots don't overlap; meant for discrete x (config values).
+               Pearson r and the overall regression always use the raw data.
 
     Returns:
         matplotlib figure
     """
+    if style not in ('scatter', 'mean_ci'):
+        raise ValueError("style must be 'scatter' or 'mean_ci'")
     # Remove NaN values
     plot_data = data[[x_col, y_col, color_by]].dropna().copy()
 
@@ -2359,6 +2692,10 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
         else:
             unique_values = sorted(unique_values)
 
+    if style == 'mean_ci' and color_by in plot_data.columns:
+        _plot_bot_mean_ci(ax, plot_data, x_col, y_col, color_by,
+                          unique_values, rank_map)
+    elif color_by in plot_data.columns:
         for idx, value in enumerate(unique_values):
             mask = plot_data[color_by] == value
 
@@ -2397,34 +2734,50 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
 
     ax.plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5, label=f'Overall Regression')
 
-    # Add correlation info to plot
-    corr_text = f'Pearson r = {pearson_r:.3f}\np-value = {pearson_p:.3e}\nn = {len(plot_data)}'
-    ax.text(0.05, 0.95, corr_text, transform=ax.transAxes,
-            verticalalignment='top', bbox=dict(boxstyle='round',
-            facecolor='wheat', alpha=0.8), fontsize=10, family='monospace')
-
     # Labels and title
     ax.set_xlabel(get_metric_name(x_col), fontsize=12, fontweight='bold')
     ax.set_ylabel(get_metric_name(y_col), fontsize=12, fontweight='bold')
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+
+    if style == 'mean_ci':
+        # One line between title and axes, so it never covers the data.
+        corr_text = (f'Pearson r = {pearson_r:.3f},  p = {pearson_p:.3g},  '
+                     f'n = {len(plot_data)}   (points: mean \u00b1 95% CI)')
+        ax.text(0.5, 1.015, corr_text, transform=ax.transAxes,
+                ha='center', va='bottom', fontsize=11)
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=26)
+    else:
+        corr_text = f'Pearson r = {pearson_r:.3f}\np-value = {pearson_p:.3e}\nn = {len(plot_data)}'
+        ax.text(0.05, 0.95, corr_text, transform=ax.transAxes,
+                verticalalignment='top', bbox=dict(boxstyle='round',
+                facecolor='wheat', alpha=0.8), fontsize=10, family='monospace')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3, linestyle='--')
 
     # Set y-axis limits to valid range [0, 1] for WinRate (crop frame instead of clipping line)
     if y_col == 'WinRate' or 'WinRate' in y_col:
         ax.set_ylim(0, 1)
 
-    # Legend - position below x-axis
+    # Legend - full-width, below x-axis
     if color_by in plot_data.columns:
         legend_title = "Bot (Rank)" if (color_by == 'Bot' and rank_map) else color_by
-        legend_padding = calculate_legend_padding(ax, rotation=0)
-        ax.legend(title=legend_title, loc='upper center', bbox_to_anchor=(0.5, legend_padding),
-                 fontsize=8, framealpha=0.9, ncol=3, markerscale=1.2)
-
-    plt.tight_layout()
+        handles, labels = ax.get_legend_handles_labels()
+        # Bots first (in rank order), overall regression last.
+        order = sorted(range(len(labels)),
+                       key=lambda i: labels[i] == 'Overall Regression')
+        legend = _place_wide_bot_legend(
+            fig, ax, title=legend_title,
+            handles=[handles[i] for i in order],
+            labels=[labels[i] for i in order])
+        # Scatter points are drawn semi-transparent; keep legend markers opaque
+        # so the bot symbols stay readable.
+        for handle in legend.legend_handles:
+            handle.set_alpha(1.0)
+    else:
+        plt.tight_layout()
     return fig
 
 
-def plot_all_correlations(df, width=10, height=8,alpha=0.2):
+def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
     """
     Create all correlation plots for win rate analysis.
     For config variables, creates separate plots for each config value.
@@ -2433,6 +2786,8 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
         df: Summary matchup dataframe
         width: Figure width
         height: Figure height
+        style: Style for the config charts (ActInterval, Round, Timer, Skill):
+               'mean_ci' (per-bot mean +/- 95% CI) or 'scatter' (raw points)
 
     Returns:
         Dictionary of figures with nested structure for config-separated plots
@@ -2449,7 +2804,7 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
         y_col='WinRate',
         title='Win Rate vs Action Interval\n(All Bots Combined)',
         figsize=(width, height),
-        add_per_bot_regression=True,alpha=alpha
+        add_per_bot_regression=True,alpha=alpha, style=style
     )
     if fig:
         figs['actinterval'] = fig
@@ -2467,7 +2822,7 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
         y_col='WinRate',
         title=round_title,
         figsize=(width, height),
-        add_per_bot_regression=True,alpha=alpha
+        add_per_bot_regression=True,alpha=alpha, style=style
     )
     if fig:
         figs['roundtype'] = fig
@@ -2479,7 +2834,7 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
         y_col='WinRate',
         title='Win Rate vs Timer Duration\n(All Bots Combined)',
         figsize=(width, height),
-        add_per_bot_regression=True,alpha=alpha
+        add_per_bot_regression=True,alpha=alpha, style=style
     )
     if fig:
         figs['timer'] = fig
@@ -2495,7 +2850,7 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2):
             y_col='WinRate',
             title='Win Rate vs Skill Type (1=Stone, 2=Boost)\n(All Bots Combined)',
             figsize=(width, height),
-            add_per_bot_regression=True,alpha=alpha
+            add_per_bot_regression=True,alpha=alpha, style=style
         )
         if fig:
             figs['skilltype'] = fig

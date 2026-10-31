@@ -391,6 +391,7 @@ def plot_joint_heatmap_with_distributions(phase_df, phase_name, bot_name="", act
 
     if cache_path:
         _write_cache_csv(pl.DataFrame({"BotPosX": bot_x, "BotPosY": bot_y}), cache_path)
+        _write_cache_meta(cache_path, len(phase_df))
 
     return _render_joint_heatmap(bot_x - arena_center[0], bot_y - arena_center[1], phase_name, bot_name, actor_position, len(phase_df))
 
@@ -423,7 +424,9 @@ def plot_joint_heatmap_from_cache(cache_path, phase_name, bot_name="", actor_pos
 
     x = df["BotPosX"].to_numpy() - arena_center[0]
     y = df["BotPosY"].to_numpy() - arena_center[1]
-    return _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, len(df))
+    # Prefer the true pre-downsampling count when the cache recorded it.
+    n_samples = _read_cache_n_samples(cache_path) or len(df)
+    return _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, n_samples)
 
 
 def _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, n_samples):
@@ -542,6 +545,242 @@ def _render_joint_heatmap(x, y, phase_name, bot_name, actor_position, n_samples)
     fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
 
     return fig
+
+
+# ========== Combined time-window figure (paper layout) ==========
+
+# Ordinal blue ramp for the window lines (light -> dark = early -> late game).
+# Validated: monotone lightness, single hue, lightest step >= 2:1 contrast on white.
+_WINDOW_LINE_COLORS = ["#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]
+
+# Same cap the chart cache uses, so fresh runs and cache re-renders look identical.
+_COMBINED_MAX_SAMPLES = 50000
+
+COMBINED_WINDOWS_STEM = "windows_combined"
+
+
+def _cache_meta_path(cache_path):
+    return os.path.splitext(cache_path)[0] + ".meta.json"
+
+
+def _write_cache_meta(cache_path, n_samples):
+    """Record the true sample count next to a (possibly downsampled) cache file."""
+    with open(_cache_meta_path(cache_path), "w") as f:
+        json.dump({"n_samples": int(n_samples)}, f)
+
+
+def _read_cache_n_samples(cache_path):
+    """True sample count before cache downsampling, or None if it wasn't recorded."""
+    meta_path = _cache_meta_path(cache_path)
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path) as f:
+            return int(json.load(f)["n_samples"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _window_start(label):
+    """Numeric start of a window label like '2.5-15s', for chronological sorting."""
+    try:
+        return float(str(label).split("-")[0])
+    except ValueError:
+        return float("inf")
+
+
+def _window_display(label):
+    """'2.5-15s' -> '2.5–15 s' (en dash, spaced unit); other labels unchanged."""
+    label = str(label)
+    if "-" in label and label.endswith("s"):
+        start, end = label[:-1].split("-", 1)
+        return f"{start}–{end} s"
+    return label
+
+
+def _format_count(n):
+    for div, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if n >= div:
+            return f"{n / div:.1f}{suffix}"
+    return str(int(n))
+
+
+def window_sample_for_combined(window_df, label):
+    """
+    Build one entry for plot_time_windows_combined() from a window's DataFrame:
+    (label, x, y, n_samples) with x/y shifted by arena_center and downsampled to
+    _COMBINED_MAX_SAMPLES (n_samples keeps the true count).
+    """
+    n_samples = len(window_df)
+    if n_samples > _COMBINED_MAX_SAMPLES:
+        window_df = window_df.sample(n=_COMBINED_MAX_SAMPLES, shuffle=True, seed=42)
+    x = window_df["BotPosX"].to_numpy() - arena_center[0]
+    y = window_df["BotPosY"].to_numpy() - arena_center[1]
+    return (label, x, y, n_samples)
+
+
+def plot_time_windows_combined(windows, title=None, fig_width=7.16, base_fontsize=8):
+    """
+    One paper-ready figure for all time windows, drawn at final print size so the
+    font sizes are the real printed sizes (default width = IEEE two-column full
+    text width, for a figure* environment):
+
+      - Top row: one contour heatmap per window, shared axes, one shared colorbar.
+        Each window's density is normalized to its own peak, so the colorbar reads
+        "fraction of that window's peak" and every window's structure stays visible.
+      - Bottom row: X and Y position density, one line per window (light -> dark
+        = early -> late), replacing the per-panel marginal histograms.
+
+    Args:
+        windows: list of (label, x, y, n_samples); x/y already shifted by arena_center.
+            n_samples is the true count (may exceed len(x) after downsampling);
+            None hides it.
+        title: Optional figure title (leave None for papers; use the caption).
+        fig_width: Figure width in inches.
+        base_fontsize: Axis-label/title font size in points (ticks are 1pt smaller).
+
+    Returns:
+        matplotlib figure, or None if no window has data.
+    """
+    from scipy.stats import gaussian_kde
+    from matplotlib.colors import LinearSegmentedColormap
+
+    windows = sorted((w for w in windows if len(w[1]) > 1), key=lambda w: _window_start(w[0]))
+    if not windows:
+        return None
+
+    n_win = len(windows)
+    lim = arena_radius + 1
+    ticks = [-4, -2, 0, 2, 4]
+    grid_1d = np.linspace(-lim, lim, 400)
+    xx, yy = np.mgrid[-lim:lim:100j, -lim:lim:100j]
+    positions = np.vstack([xx.ravel(), yy.ravel()])
+
+    panels = []
+    for label, x, y, n_samples in windows:
+        density = None
+        try:
+            density = gaussian_kde(np.vstack([x, y]))(positions).reshape(xx.shape)
+            density = density / density.max()
+            # Same masking as the single-window chart: drop the bottom 40% so the
+            # background stays white.
+            density = np.ma.masked_where(density < np.percentile(density, 40), density)
+        except Exception as e:
+            print(f"Warning: 2D KDE failed for {label}, using scatter. Error: {e}")
+        try:
+            dens_x, dens_y = gaussian_kde(x)(grid_1d), gaussian_kde(y)(grid_1d)
+        except Exception as e:
+            print(f"Warning: 1D KDE failed for {label}. Error: {e}")
+            dens_x = dens_y = None
+        panels.append((label, x, y, n_samples, density, dens_x, dens_y))
+
+    floors = [p[4].min() for p in panels if p[4] is not None]
+    levels = np.linspace(min(floors), 1.0, 11) if floors else None
+    cmap = LinearSegmentedColormap.from_list(
+        'green_gradient',
+        ['#E0FFE0', '#C0FFC0', '#90EE90', '#66DD66', '#32CD32',
+         '#2AAA2A', '#228B22', '#1A6B1A', '#006400'], N=256)
+    line_colors = (_WINDOW_LINE_COLORS if n_win <= len(_WINDOW_LINE_COLORS)
+                   else [plt.cm.Blues(v) for v in np.linspace(0.4, 0.95, n_win)])
+    tick_size = base_fontsize - 1
+
+    fig = plt.figure(figsize=(fig_width, fig_width * 0.6), layout="constrained")
+    sf_top, sf_bot = fig.subfigures(2, 1, height_ratios=[1.15, 1.0])
+
+    # ---- Top row: heatmaps ----
+    axes_top = np.atleast_1d(sf_top.subplots(1, n_win, sharex=True, sharey=True))
+    contour_set = None
+    for ax, (label, x, y, n_samples, density, _, _) in zip(axes_top, panels):
+        if density is not None:
+            contour_set = ax.contourf(xx, yy, density, levels=levels, cmap=cmap, zorder=1)
+            ax.contour(xx, yy, density, levels=levels, colors='darkgreen', alpha=0.4,
+                       linewidths=0.3, zorder=2)
+        else:
+            ax.scatter(x, y, s=0.5, alpha=0.1, c='green', zorder=1, rasterized=True)
+        ax.add_patch(plt.Circle((0, 0), arena_radius, fill=False, edgecolor="red",
+                                linewidth=0.9, linestyle="--", zorder=3))
+        ax.set_aspect("equal")
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
+        ax.grid(True, alpha=0.3, linewidth=0.4, zorder=0)
+        ax.tick_params(labelsize=tick_size, length=2)
+        panel_title = _window_display(label)
+        if n_samples is not None:
+            panel_title += f"\nn = {_format_count(n_samples)}"
+        ax.set_title(panel_title, fontsize=base_fontsize, pad=3)
+
+    axes_top[0].set_ylabel("Y position", fontsize=base_fontsize)
+    sf_top.supxlabel("X position", fontsize=base_fontsize)
+    if contour_set is not None:
+        cbar = sf_top.colorbar(contour_set, ax=list(axes_top), shrink=0.85, aspect=18, pad=0.01)
+        cbar.set_label("Relative density", fontsize=base_fontsize)
+        cbar.set_ticks([0.25, 0.5, 0.75, 1.0])
+        cbar.ax.tick_params(labelsize=tick_size, length=2)
+
+    # ---- Bottom row: X / Y densities, one line per window ----
+    ax_x, ax_y = sf_bot.subplots(1, 2)
+    for color, (label, _, _, _, _, dens_x, dens_y) in zip(line_colors, panels):
+        if dens_x is None:
+            continue
+        ax_x.plot(grid_1d, dens_x, color=color, linewidth=1.3, label=_window_display(label))
+        ax_y.plot(grid_1d, dens_y, color=color, linewidth=1.3)
+    for ax, axis_name in ((ax_x, "X position"), (ax_y, "Y position")):
+        for edge in (-arena_radius, arena_radius):
+            ax.axvline(edge, color="red", linestyle="--", linewidth=0.8, alpha=0.6, zorder=0)
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(bottom=0)
+        ax.set_xticks(ticks)
+        ax.set_xlabel(axis_name, fontsize=base_fontsize)
+        ax.set_ylabel("Density", fontsize=base_fontsize)
+        ax.grid(True, alpha=0.3, linewidth=0.4)
+        ax.tick_params(labelsize=tick_size, length=2)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    handles, labels = ax_x.get_legend_handles_labels()
+    if handles:
+        sf_bot.legend(handles, labels, loc="outside lower center", ncol=n_win,
+                      frameon=False, fontsize=tick_size, handlelength=2.0)
+
+    if title:
+        fig.suptitle(title, fontsize=base_fontsize + 1, fontweight="bold")
+    return fig
+
+
+def _save_combined_windows(fig, output_dir):
+    """Save the combined figure as vector PDF (for LaTeX) and 300-dpi PNG.
+    No bbox_inches='tight', so the saved size matches the print size exactly."""
+    if fig is None:
+        return None
+    os.makedirs(output_dir, exist_ok=True)
+    base = os.path.join(output_dir, COMBINED_WINDOWS_STEM)
+    fig.savefig(f"{base}.pdf")
+    fig.savefig(f"{base}.png", dpi=300)
+    plt.close(fig)
+    print(f"  Saved combined time-window figure to {base}.pdf / .png")
+    return base
+
+
+def render_time_windows_combined_from_cache(cache_bot_dir, output_dir, title=None):
+    """
+    Build the combined time-window figure from the window_* cache files of one bot
+    (or All_Bots_Combined) and save it to output_dir. Returns the saved path base,
+    or None if there were no cached windows.
+    """
+    windows = []
+    for path in _cached_files(cache_bot_dir, "window_*.csv"):
+        df = pl.read_parquet(path) if path.endswith(".parquet") else pl.read_csv(path)
+        if df.is_empty():
+            continue
+        label = Path(path).stem[len("window_"):]
+        windows.append((label,
+                        df["BotPosX"].to_numpy() - arena_center[0],
+                        df["BotPosY"].to_numpy() - arena_center[1],
+                        _read_cache_n_samples(path)))
+    if not windows:
+        return None
+    return _save_combined_windows(plot_time_windows_combined(windows, title), output_dir)
 
 def create_phased_heatmap(csv_path, output_path=None, chunksize=50000):
     """
@@ -1456,9 +1695,6 @@ def _render_distance_distribution(between_numpy, from_center_numpy, name, output
     ax1.set_xlabel("Distance Between Bots", fontsize=12)
     ax1.set_ylabel("Frequency", fontsize=12)
     ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.text(0.98, 0.98, f"n={len(between_numpy):,}",
-            transform=ax1.transAxes, ha='right', va='top',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     # Plot 2: Distance from center
     ax2.hist(from_center_numpy, bins=30, color='green', edgecolor='black', alpha=0.7)
@@ -1468,14 +1704,8 @@ def _render_distance_distribution(between_numpy, from_center_numpy, name, output
     ax2.set_ylabel("Frequency", fontsize=12)
     ax2.grid(True, alpha=0.3, linestyle='--')
 
-    # Add arena radius reference line
-    ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2,
-               label=f'Arena Radius ({arena_radius:.2f})', alpha=0.8)
-    ax2.legend(loc='upper right', fontsize=10)
-
-    ax2.text(0.98, 0.98, f"n={len(from_center_numpy):,}",
-            transform=ax2.transAxes, ha='right', va='top',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # Arena radius reference line (explained in the figure caption, no legend)
+    ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2, alpha=0.8)
 
     plt.tight_layout()
 
@@ -1937,9 +2167,6 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
         ax1.set_xlabel("Distance Between Bots", fontsize=12)
         ax1.set_ylabel("Frequency", fontsize=12)
         ax1.grid(True, alpha=0.3, linestyle='--')
-        ax1.text(0.98, 0.98, f"n={len(between_numpy):,}",
-                transform=ax1.transAxes, ha='right', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         # Plot 2: Distance from center
         ax2.hist(from_center_numpy, bins=30, color='green', edgecolor='black', alpha=0.7)
@@ -1948,14 +2175,8 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
         ax2.set_ylabel("Frequency", fontsize=12)
         ax2.grid(True, alpha=0.3, linestyle='--')
 
-        # Add arena radius reference line
-        ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2,
-                   label=f'Arena Radius ({arena_radius:.2f})', alpha=0.8)
-        ax2.legend(loc='upper right', fontsize=10)
-
-        ax2.text(0.98, 0.98, f"n={len(from_center_numpy):,}",
-                transform=ax2.transAxes, ha='right', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        # Arena radius reference line (explained in the figure caption, no legend)
+        ax2.axvline(x=arena_radius, color='red', linestyle='--', linewidth=2, alpha=0.8)
 
         plt.tight_layout()
 
@@ -2164,6 +2385,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     output_path = os.path.join(bot_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, bot_name, output_path, actor_position)
                 print(f"  ✅ Rendered {len(cached_windows)} time-window heatmaps from cache" + " " * 20)
+                render_time_windows_combined_from_cache(cache_bot_dir, bot_dir)
 
             elif use_time_windows:
                 # Time window mode - fixed time windows [0-15s, 15-30s, 30-45s, 45-60s]
@@ -2198,6 +2420,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                 ]
 
                 print(f"\nSplitting data into fixed time windows...")
+                combined_windows = []
                 # Create plots for each time window
                 for start, end, window_name in time_windows:
                     # Filter data for this time window
@@ -2216,6 +2439,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     # Create joint plot
                     cache_path = os.path.join(cache_bot_dir, f"window_{start}-{end}s.csv") if cache_bot_dir else None
                     fig = plot_joint_heatmap_with_distributions(window_df, window_name, bot_name, actor_position, cache_path=cache_path)
+                    combined_windows.append(window_sample_for_combined(window_df, window_name))
 
                     if fig is not None:
                         # Save with window name in filename
@@ -2223,6 +2447,8 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         plt.savefig(output_path, dpi=150, bbox_inches='tight')
                         print(f"  Saved to {output_path}")
                         plt.close(fig)
+
+                _save_combined_windows(plot_time_windows_combined(combined_windows), bot_dir)
 
             # Check phase cache once
             cached_phases = _cached_files(cache_bot_dir, "[0-2].csv") if use_cache_if_exists else []
@@ -2429,6 +2655,7 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                     output_path = os.path.join(agg_dir, f"{Path(cache_path).stem}.png")
                     _render_single_cached_chart(cache_path, agg_label, output_path, actor_position)
                 print(f"  ✅ Rendered {len(agg_cached_windows)} aggregate time-window heatmaps from cache" + " " * 20)
+                render_time_windows_combined_from_cache(agg_cache_dir, agg_dir)
 
             elif use_time_windows:
                 print("\n📥 Loading pooled data for time window grouping (all bots)...")
@@ -2451,17 +2678,20 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
                         (30, 45, "30-45s"),
                         (45, 60, "45-60s")
                     ]
+                    agg_combined_windows = []
                     for start, end, window_name in time_windows:
                         window_df = agg_df_combined.filter((pl.col("UpdatedAt") >= start) & (pl.col("UpdatedAt") < end))
                         if window_df.is_empty():
                             continue
                         cache_path = os.path.join(agg_cache_dir, f"window_{start}-{end}s.csv") if agg_cache_dir else None
                         fig = plot_joint_heatmap_with_distributions(window_df, window_name, agg_label, actor_position, cache_path=cache_path)
+                        agg_combined_windows.append(window_sample_for_combined(window_df, window_name))
                         if fig is not None:
                             output_path = os.path.join(agg_dir, f"window_{start}-{end}s.png")
                             plt.savefig(output_path, dpi=150, bbox_inches='tight')
                             print(f"  Saved to {output_path}")
                             plt.close(fig)
+                    _save_combined_windows(plot_time_windows_combined(agg_combined_windows), agg_dir)
 
             # Check aggregate phase cache once
             agg_cached_phases = _cached_files(agg_cache_dir, "[0-2].csv") if use_cache_if_exists else []
@@ -2779,6 +3009,9 @@ def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filte
             output_path = os.path.join(out_bot_dir, f"{Path(fname).stem}.png")
             if _render_single_cached_chart(cache_path, name, output_path, actor_position):
                 count += 1
+
+        if render_time_windows_combined_from_cache(cache_bot_dir, out_bot_dir):
+            count += 1
 
     print(f"\n✅ Regenerated {count} charts from cache into {output_dir}")
     return count

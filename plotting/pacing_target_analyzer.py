@@ -88,7 +88,7 @@ def _add_stats_box(ax, stats_by_label):
     if not stats_by_label:
         return
     lines = [
-        f"{label}: μ={s['mean']:.3f}  σ={s['std']:.3f}  err={s['sem']:.3f}  (n={s['n']})"
+        f"{label}: μ={s['mean']:.2f}  σ={s['std']:.2f}  err={s['sem']:.2f}  (n={s['n']})"
         for label, s in stats_by_label.items()
     ]
     ax.text(

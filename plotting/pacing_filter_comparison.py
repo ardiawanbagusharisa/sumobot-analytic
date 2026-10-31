@@ -214,7 +214,7 @@ def plot_pacing_factor_comparison(df, bot, width=16, height=8):
 
         stats_by_group = {g: _stats(bot_df.loc[bot_df["Group"] == g, factor]) for g in groups}
         lines = [
-            f"{g}: μ={s['mean']:.3f}  σ={s['std']:.3f}  (n={s['n']})"
+            f"{g}: μ={s['mean']:.2f}  σ={s['std']:.2f}  (n={s['n']})"
             for g, s in stats_by_group.items() if s["n"] > 0
         ]
         ax.text(
@@ -328,7 +328,7 @@ def plot_pacing_factor_timeseries(df, bot, width=16, height=8):
         ax.set_title(f"{factor} ({kind})", fontsize=10, fontweight="bold")
         ax.set_xlabel("Segment (s)", fontsize=8)
         ax.grid(True, alpha=0.3, linestyle="--")
-        ax.legend(fontsize=7, loc="best")
+        ax.legend(fontsize=7, loc="upper right")
 
     fig.suptitle(f"{bot}: Filtered vs Unfiltered Pacing Over Match Segments", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
@@ -559,14 +559,6 @@ def _draw_target_tracking_panels(axes, track_df, unfiltered_df, pacing_target=No
             u_agg = unfiltered_df.groupby("TimeBin")[metric].mean().reset_index().sort_values("TimeBin")
             ax.plot(u_agg["TimeBin"], u_agg[metric], color=unfiltered_color, linewidth=1.5,
                     linestyle="-.", alpha=0.7, label="Unfiltered (approx.)", zorder=1.5)
-
-        mae = _mae(track_df[actual_col], track_df[target_col])
-        n_segments = int(track_df[actual_col].notna().sum())
-        ax.text(
-            0.02, 0.02, f"MAE(Actual, Target) = {mae:.4f}\n(n={n_segments} segments)",
-            transform=ax.transAxes, fontsize=7.5, va="bottom", ha="left", family="monospace",
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#999999", alpha=0.85), zorder=5,
-        )
 
         ax.set_title(metric, fontsize=12, fontweight="bold")
         ax.set_xlabel("Segment (s)", fontsize=9)
@@ -880,11 +872,7 @@ def _draw_target_tracking_panels_by_bot(axes, track_df, unfiltered_by_bot, bot_c
             n_segments = int(bot_df[actual_col].notna().sum())
             mae_lines.append(f"{bot}: MAE={mae:.4f} (n={n_segments})")
 
-        ax.text(
-            0.02, 0.02, "\n".join(mae_lines), transform=ax.transAxes, fontsize=6.5, va="bottom", ha="left",
-            family="monospace", bbox=dict(boxstyle="round", facecolor="white", edgecolor="#999999", alpha=0.85),
-            zorder=5,
-        )
+        # MAE annotation removed — see MAE across targets table cell below
 
         ax.set_title(metric, fontsize=12, fontweight="bold")
         ax.set_xlabel("Segment (s)", fontsize=9)
