@@ -658,7 +658,87 @@ def plot_grouped_config_winrates(
     -------
     matplotlib.figure.Figure
     """
+    bots, rank_map, config_values, config_col_display, grouped = _grouped_config_means(
+        df, bot_col=bot_col, metric=metric, config_col=config_col)
 
+    # Create the grouped bar chart
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    # Define colors for each config value
+    categorical_colors = get_theme_color('categorical')
+    config_colors = {val: categorical_colors[i % len(categorical_colors)] for i, val in enumerate(config_values)}
+
+    # Set up bar positions
+    n_bots = len(bots)
+    n_configs = len(config_values)
+    bar_width = 0.8 / n_configs
+    x_positions = np.arange(n_bots)
+
+    # Plot bars for each config value
+    for i, config_val in enumerate(config_values):
+        means = _config_means_for_bots(grouped, bots, bot_col, config_col_display, config_val)
+
+        offset = (i - n_configs/2 + 0.5) * bar_width
+        bars = ax.bar(x_positions + offset, means, bar_width,
+               label=str(config_val), color=config_colors[config_val],)
+
+        # Add value labels inside bars
+        for bar, mean_val in zip(bars, means):
+            height = bar.get_height()
+            if height > 0:  # Only add label if bar has height
+                ax.text(bar.get_x() + bar.get_width()/2., height/2,
+                        f'{mean_val:.1f}',
+                        ha='center', va='center', fontsize=7, fontweight='bold', color='white')
+
+    # Customize plot
+    ax.set_xlabel(get_metric_name('Bot'), fontsize=12, fontweight='bold')
+    ax.set_ylabel(ylabel if ylabel else get_metric_name(metric.replace('_L', '')), fontsize=12, fontweight='bold')
+
+    if title:
+        plot_title = title
+    else:
+        display_name = get_metric_name("Skill") if config_col == "Skill" else get_metric_name(config_col)
+        plot_title = f'{get_metric_name(metric.replace("_L", ""))} grouped by {display_name}'
+
+    ax.set_title(plot_title, fontsize=14, fontweight='bold', pad=15)
+    ax.set_xticks(x_positions)
+    # Create bot labels with rank
+    if rank_map:
+        bot_labels = [f"{bot} (#{int(rank_map[bot])})" for bot in bots]
+    else:
+        bot_labels = bots
+    ax.set_xticklabels(bot_labels, rotation=30, ha='right')
+
+    # Calculate dynamic padding for legend
+    legend_padding = calculate_legend_padding(ax, x_labels=bot_labels, rotation=30)
+    ax.legend(title=config_col_display, loc='upper center', bbox_to_anchor=(0.5, legend_padding),
+              ncol=min(6, n_configs), fontsize=10, framealpha=0.9)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def _config_means_for_bots(grouped, bots, bot_col, config_col_display, config_val):
+    """Mean metric per bot (in `bots` order) for one config value; 0 if missing."""
+    config_data = grouped[grouped[config_col_display] == config_val]
+    means = []
+    for bot in bots:
+        bot_data = config_data[config_data[bot_col] == bot]
+        means.append(bot_data['mean'].values[0] if not bot_data.empty else 0)
+    return means
+
+
+def _grouped_config_means(df, bot_col="Bot_L", metric="WinRate_L", config_col="Timer"):
+    """
+    Shared aggregation for the grouped-by-config bar charts.
+
+    Returns
+    -------
+    (bots, rank_map, config_values, config_col_display, grouped)
+        bots: bot names in rank order; rank_map: {bot: rank} (may be empty);
+        grouped: DataFrame [bot_col, config_col_display, mean, std].
+    """
     # Get unique bots and sort by rank
     rank_col = "Rank_L" if bot_col == "Bot_L" else "Rank_R"
     if rank_col in df.columns:
@@ -722,79 +802,105 @@ def plot_grouped_config_winrates(
 
         config_col_display = config_col
 
-    # Create the grouped bar chart
-    fig, ax = plt.subplots(figsize=(width, height))
+    return bots, rank_map, config_values, config_col_display, grouped
 
-    # Define colors for each config value
+
+def plot_grouped_config_panels(
+    df,
+    metrics=("WinRate_L", "Collisions_L", "ActionCounts_L", "MatchDur"),
+    config_col="Skill",
+    bot_col="Bot_L",
+    panel_titles=None,
+    show_values=False,
+    title=None,
+    fig_width=7.16,
+    fig_height=None,
+    base_fontsize=7,
+):
+    """
+    Several grouped-by-config metrics side by side in one row (one panel per
+    metric), drawn at print size for a full-width IEEE figure.
+
+    Bars are horizontal so the bot names are written once (left axis, shared by
+    all panels, #1 at the top) instead of rotated under every panel. Same data as
+    plot_grouped_config_winrates for each metric.
+
+    Args:
+        df: Summary matchup dataframe.
+        metrics: Metric columns, one panel each (left to right).
+        config_col: Config to group by ("Skill", "Timer", "ActInterval", "Round").
+        bot_col: Bot column.
+        panel_titles: Optional list of panel titles (default: metric display names).
+        show_values: Write each bar's value at its end (small; off by default).
+        title: Optional figure title.
+        fig_width, fig_height: Figure size in inches. fig_height=None grows with
+            the number of config values (2.6in for 2 groups, +0.4in per extra).
+        base_fontsize: Font size in points at print size.
+
+    Returns:
+        matplotlib figure
+    """
+    metrics = list(metrics)
+    results = [_grouped_config_means(df, bot_col=bot_col, metric=m, config_col=config_col)
+               for m in metrics]
+    bots, rank_map, config_values, config_col_display, _ = results[0]
+    bot_labels = [f"{b} (#{int(rank_map[b])})" if b in rank_map else str(b) for b in bots]
+
     categorical_colors = get_theme_color('categorical')
-    config_colors = {val: categorical_colors[i % len(categorical_colors)] for i, val in enumerate(config_values)}
-
-    # Set up bar positions
-    n_bots = len(bots)
+    config_colors = {val: categorical_colors[i % len(categorical_colors)]
+                     for i, val in enumerate(config_values)}
     n_configs = len(config_values)
-    bar_width = 0.8 / n_configs
-    x_positions = np.arange(n_bots)
+    bar_height = 0.8 / n_configs
+    y_positions = np.arange(len(bots))
+    tick_size = base_fontsize - 1
+    if fig_height is None:
+        fig_height = 2.6 + 0.4 * max(0, n_configs - 2)
 
-    # Plot bars for each config value
-    for i, config_val in enumerate(config_values):
-        if config_col == "Skill":
-            config_data = grouped[grouped["SkillType"] == config_val]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(fig_width, fig_height),
+                             sharey=True, layout='constrained', squeeze=False)
+    axes = axes[0]
+
+    for idx, (ax, metric, (_, _, _, _, grouped)) in enumerate(zip(axes, metrics, results)):
+        for i, config_val in enumerate(config_values):
+            means = _config_means_for_bots(grouped, bots, bot_col, config_col_display, config_val)
+            # First config on top within each bot's pair.
+            offset = (i - n_configs / 2 + 0.5) * bar_height
+            bars = ax.barh(y_positions + offset, means, bar_height,
+                           color=config_colors[config_val], label=str(config_val))
+            if show_values:
+                for bar, val in zip(bars, means):
+                    if val > 0:
+                        # 2 decimals for 0-1 metrics (win rate), 1 otherwise.
+                        text = f' {val:.2f}' if val < 1 else f' {val:.1f}'
+                        ax.text(bar.get_width(), bar.get_y() + bar.get_height() / 2,
+                                text, ha='left', va='center',
+                                fontsize=base_fontsize - 2.5)
+
+        if panel_titles and idx < len(panel_titles):
+            panel_title = panel_titles[idx]
         else:
-            config_data = grouped[grouped[config_col] == config_val]
+            panel_title = get_metric_name(metric.replace('_L', ''))
+        ax.set_title(panel_title, fontsize=base_fontsize + 1, fontweight='bold', pad=3)
+        ax.grid(axis='x', linestyle='--', alpha=0.3, linewidth=0.5)
+        ax.set_axisbelow(True)
+        ax.tick_params(labelsize=tick_size, length=2, pad=1.5)
+        ax.set_xlim(left=0)
+        if show_values:
+            ax.margins(x=0.18)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
 
-        means = []
-        # stds = []
+    axes[0].set_yticks(y_positions)
+    axes[0].set_yticklabels(bot_labels)
+    axes[0].invert_yaxis()  # #1 at the top (shared, so applies to every panel)
 
-        for bot in bots:
-            bot_data = config_data[config_data[bot_col] == bot]
-            if not bot_data.empty:
-                means.append(bot_data['mean'].values[0])
-                # std_val = bot_data['std'].values[0]
-                # stds.append(std_val if not pd.isna(std_val) else 0)
-            else:
-                means.append(0)
-                # stds.append(0)
-
-        offset = (i - n_configs/2 + 0.5) * bar_width
-        bars = ax.bar(x_positions + offset, means, bar_width,
-               label=str(config_val), color=config_colors[config_val],)
-            #    yerr=stds, capsize=3, error_kw={'linewidth': 1.5, 'elinewidth': 1})
-
-        # Add value labels inside bars
-        for bar, mean_val in zip(bars, means):
-            height = bar.get_height()
-            if height > 0:  # Only add label if bar has height
-                ax.text(bar.get_x() + bar.get_width()/2., height/2,
-                        f'{mean_val:.1f}',
-                        ha='center', va='center', fontsize=7, fontweight='bold', color='white')
-
-        
-    # Customize plot
-    ax.set_xlabel(get_metric_name('Bot'), fontsize=12, fontweight='bold')
-    ax.set_ylabel(ylabel if ylabel else get_metric_name(metric.replace('_L', '')), fontsize=12, fontweight='bold')
-
+    handles, labels = axes[0].get_legend_handles_labels()
+    legend_title = get_metric_name("Skill") if config_col == "Skill" else get_metric_name(config_col)
+    fig.legend(handles, labels, title=legend_title, loc='outside lower center',
+               ncol=n_configs, frameon=False, fontsize=base_fontsize,
+               title_fontsize=base_fontsize)
     if title:
-        plot_title = title
-    else:
-        display_name = get_metric_name("Skill") if config_col == "Skill" else get_metric_name(config_col)
-        plot_title = f'{get_metric_name(metric.replace("_L", ""))} grouped by {display_name}'
-
-    ax.set_title(plot_title, fontsize=14, fontweight='bold', pad=15)
-    ax.set_xticks(x_positions)
-    # Create bot labels with rank
-    if rank_map:
-        bot_labels = [f"{bot} (#{int(rank_map[bot])})" for bot in bots]
-    else:
-        bot_labels = bots
-    ax.set_xticklabels(bot_labels, rotation=30, ha='right')
-
-    # Calculate dynamic padding for legend
-    legend_padding = calculate_legend_padding(ax, x_labels=bot_labels, rotation=30)
-    ax.legend(title=config_col_display, loc='upper center', bbox_to_anchor=(0.5, legend_padding),
-              ncol=min(6, n_configs), fontsize=10, framealpha=0.9)
-    ax.grid(axis='y', linestyle='--', alpha=0.3)
-
-    fig.tight_layout()
+        fig.suptitle(title, fontsize=base_fontsize + 2, fontweight='bold')
     return fig
 
 
