@@ -269,6 +269,63 @@ def plot_time_related(summary, width=8, height=6):
         figs.append(fig)
     return figs
 
+
+def plot_match_duration_vs_action_interval(summary, width=10, height=6, timers=None):
+    """
+    Line chart of average match duration per bot across Action Interval values,
+    one figure per Timer. Line version of
+    plot_grouped_config_winrates(metric="MatchDur", config_col="ActInterval"),
+    with the same bot markers/colors/rank styling as the other line charts and a
+    full-width legend below the axes.
+
+    Args:
+        summary: Summary matchup dataframe (summary_matchup.csv).
+        width, height: Figure size.
+        timers: Optional list of Timer values to plot (default: every Timer).
+
+    Returns:
+        List of figures, one per Timer (ascending).
+    """
+    grouped = (
+        summary.groupby(["Timer", "ActInterval", "Bot_L"], as_index=False)
+        .agg(MatchDur=("MatchDur", "mean"), Rank_L=("Rank_L", "first"))
+    )
+    rank_map = grouped.groupby("Bot_L")["Rank_L"].first().round(0).astype(int).to_dict()
+    grouped["BotWithRank"] = grouped["Bot_L"].map(lambda b: f"{b} (#{rank_map[b]})")
+    bot_order = sorted(rank_map, key=lambda b: rank_map[b])
+    bot_order_with_rank = [f"{b} (#{rank_map[b]})" for b in bot_order]
+
+    timer_values = sorted(grouped["Timer"].unique()) if timers is None else list(timers)
+    figs = []
+    for timer in timer_values:
+        subset = grouped[grouped["Timer"] == timer].sort_values("ActInterval")
+        if subset.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(width, height))
+        plot_with_bot_markers(ax, data=subset, x="ActInterval", y="MatchDur",
+                              hue="BotWithRank", hue_order=bot_order_with_rank)
+
+        timer_label = f"{int(timer)}" if float(timer).is_integer() else f"{timer}"
+        ax.set_title(f"Average {get_metric_name('MatchDur')} vs {get_metric_name('ActInterval')}\n"
+                     f"({get_metric_name('Timer')} = {timer_label} s)")
+        ax.set_xlabel(f"{get_metric_name('ActInterval')} (s)")
+        ax.set_ylabel(f"Average {get_metric_name('MatchDur')} (s)")
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+        intervals = sorted(subset["ActInterval"].unique())
+        ax.set_xticks(intervals)
+        ax.set_xticklabels([f"{v:g}" for v in intervals])
+
+        # Legend in rank order, stretched to the axes' full width.
+        handles, labels = ax.get_legend_handles_labels()
+        label_to_handle = dict(zip(labels, handles))
+        ordered = [b for b in bot_order_with_rank if b in label_to_handle]
+        _place_wide_bot_legend(fig, ax, title="Bot (Rank)",
+                               handles=[label_to_handle[b] for b in ordered], labels=ordered)
+        figs.append(fig)
+    return figs
+
 @st.cache_data
 def plot_action_win_related(summary, width=8, height=6):
     # Step 1: Compute average actions per game (as before)
