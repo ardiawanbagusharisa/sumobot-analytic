@@ -1455,10 +1455,13 @@ def _place_bottom_legend(fig, ax, ncol, pad=0.01, expand=False, handles=None,
     expand=True stretches the legend horizontally to span the axes' full width
     (left spine to right spine) instead of centering it at its natural width.
     """
+    axes_list = list(np.ravel(ax)) if isinstance(ax, (list, tuple, np.ndarray)) else [ax]
+    ax = axes_list[0]
     if handles is None or labels is None:
         handles, labels = ax.get_legend_handles_labels()
-    if ax.get_legend() is not None:
-        ax.get_legend().remove()
+    for a in axes_list:
+        if a.get_legend() is not None:
+            a.get_legend().remove()
 
     kwargs = dict(fontsize=STACKED_FONT['legend'], frameon=False,
                   handlelength=1.5, columnspacing=1.5)
@@ -1480,9 +1483,11 @@ def _place_bottom_legend(fig, ax, ncol, pad=0.01, expand=False, handles=None,
     fig.tight_layout(rect=(0, legend_h + pad, 1, 1))
 
     if expand:
-        # Align the stretched legend with the final axes area.
-        pos = ax.get_position()
-        legend.set_bbox_to_anchor((pos.x0, 0.0, pos.width, 0.0),
+        # Align the stretched legend with the final axes area (union of all
+        # given axes, so multi-panel figures get a legend as wide as the grid).
+        x0 = min(a.get_position().x0 for a in axes_list)
+        x1 = max(a.get_position().x1 for a in axes_list)
+        legend.set_bbox_to_anchor((x0, 0.0, x1 - x0, 0.0),
                                   transform=fig.transFigure)
     return legend
 
@@ -2940,6 +2945,127 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
     return fig
 
 
+def plot_winrate_correlation_panels(data, x_cols, title, rank_map=None, ncols=3,
+                                    per_bot_regression=True, alpha=0.2,
+                                    x_labels=None, y_col='WinRate',
+                                    fig_width=7.16, panel_height=1.9,
+                                    base_fontsize=8):
+    """
+    Grid of Win Rate vs metric scatter panels (one panel per column in x_cols),
+    sized for an IEEE full-width figure (figure*, 7.16 in).
+
+    Each panel: per-bot points (+ optional per-bot dashed regression), the
+    overall regression, and "r, p, n" in one line above the axes so it never
+    covers data. Panels share the Win Rate axis; one full-width legend sits
+    under all panels.
+
+    Args:
+        data: correlation dataframe from prepare_correlation_data()
+        x_cols: metric columns to plot against y_col
+        title: figure title
+        rank_map: {bot: rank} for legend order and "(#rank)" labels
+        ncols: panels per row
+        per_bot_regression: draw a dashed regression line per bot
+        alpha: transparency of the raw points (legend markers stay opaque)
+        x_labels: optional {col: display name}; defaults to get_metric_name
+        fig_width, panel_height: inches
+        base_fontsize: tick/legend size; labels +1, titles +2
+
+    Returns:
+        matplotlib figure, or None when no column has data
+    """
+    x_cols = [c for c in x_cols if c in data.columns]
+    if not x_cols:
+        return None
+    rank_map = rank_map or {}
+    x_labels = x_labels or {}
+
+    n = len(x_cols)
+    ncols = min(ncols, n)
+    nrows = int(np.ceil(n / ncols))
+    fs_tick, fs_label, fs_title = base_fontsize, base_fontsize + 1, base_fontsize + 2
+
+    fig, axes = plt.subplots(nrows, ncols, sharey=True,
+                             figsize=(fig_width, panel_height * nrows + 1.3),
+                             squeeze=False)
+    axes_flat = axes.flatten()
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    legend_entries = {}
+    reg_color = get_theme_color('regression_line')
+
+    for idx, col in enumerate(x_cols):
+        ax = axes_flat[idx]
+        name = x_labels.get(col, get_metric_name(col))
+        plot_data = data[[col, y_col, 'Bot']].dropna()
+
+        if len(plot_data) < 2:
+            ax.text(0.5, 0.5, 'Insufficient data', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=fs_tick)
+            ax.set_title(name, fontsize=fs_title, fontweight='bold')
+            continue
+
+        bots = sorted(plot_data['Bot'].unique(),
+                      key=lambda b: (rank_map.get(b, 999), str(b)))
+        for bot in bots:
+            bot_data = plot_data[plot_data['Bot'] == bot]
+            color = get_bot_color(bot)
+            label = f"{bot} (#{int(rank_map[bot])})" if bot in rank_map else str(bot)
+            h = ax.scatter(bot_data[col], bot_data[y_col], s=14, alpha=alpha,
+                           color=color, marker=get_bot_marker(bot),
+                           edgecolors='black', linewidths=0.3, label=label)
+            legend_entries.setdefault(label, h)
+
+            if per_bot_regression:
+                bx, by = bot_data[col].values, bot_data[y_col].values
+                if len(bx) > 1 and bx.std() > 0:
+                    k, b0 = np.polyfit(bx, by, 1)
+                    xs = np.linspace(bx.min(), bx.max(), 50)
+                    ax.plot(xs, k * xs + b0, '--', linewidth=0.8,
+                            color=color, alpha=0.7)
+
+        ox, oy = plot_data[col].values, plot_data[y_col].values
+        if ox.std() > 0:
+            k, b0 = np.polyfit(ox, oy, 1)
+            xs = np.linspace(ox.min(), ox.max(), 50)
+            (line,) = ax.plot(xs, k * xs + b0, '-', color=reg_color,
+                              linewidth=1.6, label='Overall Regression')
+            legend_entries.setdefault('Overall Regression', line)
+            r, p = stats.pearsonr(ox, oy)
+            stat_text = f'r = {r:.3f},  p = {p:.2g},  n = {len(plot_data)}'
+        else:
+            stat_text = f'r = n/a (constant x),  n = {len(plot_data)}'
+
+        ax.set_title(name, fontsize=fs_title, fontweight='bold', pad=13)
+        ax.text(0.5, 1.01, stat_text, transform=ax.transAxes, ha='center',
+                va='bottom', fontsize=fs_tick - 0.5)
+        ax.set_xlabel(name, fontsize=fs_label)
+        if idx % ncols == 0:
+            ax.set_ylabel(get_metric_name(y_col), fontsize=fs_label)
+        ax.tick_params(axis='both', labelsize=fs_tick, length=2.5, pad=1.5)
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        ax.set_axisbelow(True)
+        if 'WinRate' in y_col:
+            ax.set_ylim(0, 1)
+
+    fig.suptitle(title, fontsize=fs_title + 1, fontweight='bold')
+
+    labels = [l for l in legend_entries if l != 'Overall Regression']
+    if 'Overall Regression' in legend_entries:
+        labels.append('Overall Regression')
+    handles = [legend_entries[l] for l in labels]
+    legend = _place_bottom_legend(
+        fig, list(axes_flat[:n]), ncol=4, expand=True, pad=0.005,
+        handles=handles, labels=labels, title='Bot (Rank)' if rank_map else 'Bot',
+        fontsize=fs_tick, title_fontsize=fs_label, frameon=True,
+        framealpha=0.9, handlelength=1.5, handletextpad=0.4, columnspacing=0.8,
+        borderaxespad=0.2)
+    for handle in legend.legend_handles:
+        handle.set_alpha(1.0)
+    return fig
+
+
 def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
     """
     Create all correlation plots for win rate analysis.
@@ -3081,298 +3207,36 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
     # if skill_figs:
     #     figs['skillactions'] = skill_figs
 
-    # e. Winrate vs Individual Actions
-    action_types = ['Accelerate_Act', 'TurnLeft_Act', 'TurnRight_Act',
+    # e. Winrate vs Individual Actions / Durations, f. Collision Types
+    # Multi-panel figures drawn at IEEE full text width (7.16 in) so they need
+    # no scaling in the paper; legend spans the full width below the panels.
+    rank_map = {}
+    if 'Rank_L' in data.columns:
+        rank_map = data.groupby('Bot')['Rank_L'].first().to_dict()
+
+    action_cols = ['Accelerate_Act', 'TurnLeft_Act', 'TurnRight_Act',
                    'Dash_Act', 'SkillBoost_Act', 'SkillStone_Act']
+    fig = plot_winrate_correlation_panels(
+        data, action_cols, title='Win Rate vs Individual Action Types (All Bots Combined)',
+        rank_map=rank_map, ncols=3, per_bot_regression=True, alpha=alpha)
+    if fig:
+        figs['actions'] = fig
 
-    # Get bot rankings if available
-    rank_map = {}
-    if 'Rank_L' in data.columns:
-        rank_map = data.groupby('Bot')['Rank_L'].first().to_dict()
+    dur_cols = ['Accelerate_Dur', 'TurnLeft_Dur', 'TurnRight_Dur', 'Dash_Dur']
+    fig = plot_winrate_correlation_panels(
+        data, dur_cols, title='Win Rate vs Individual Action Duration (All Bots Combined)',
+        rank_map=rank_map, ncols=2, per_bot_regression=True, alpha=alpha)
+    if fig:
+        figs['actions_dur'] = fig
 
-    fig, axes = plt.subplots(2, 3, figsize=(width*1.2, height*1.5))
-    axes = axes.flatten()
-
-    for idx, action in enumerate(action_types):
-        if action not in data.columns:
-            continue
-
-        plot_data = data[[action, 'WinRate', 'Bot']].dropna()
-
-        if len(plot_data) == 0:
-            axes[idx].text(0.5, 0.5, f'No data for {action}',
-                          ha='center', va='center', transform=axes[idx].transAxes)
-            continue
-
-        # Calculate Pearson correlation
-        pearson_r, pearson_p = stats.pearsonr(plot_data[action], plot_data['WinRate'])
-
-        # Scatter plot - sort bots by rank
-        unique_bots = plot_data['Bot'].unique()
-        if rank_map:
-            # Sort bots by rank
-            unique_bots = sorted(unique_bots, key=lambda b: rank_map.get(b, 999))
-
-        for bot in unique_bots:
-            mask = plot_data['Bot'] == bot
-            marker = get_bot_marker(bot)
-            color = get_bot_color(bot)
-
-            # Create label with rank if available
-            if rank_map and bot in rank_map:
-                label = f"{bot} (#{int(rank_map[bot])})"
-            else:
-                label = bot
-
-            axes[idx].scatter(plot_data[mask][action], plot_data[mask]['WinRate'],
-                            label=label, alpha=alpha, s=30, color=color,
-                            marker=marker, edgecolors='black', linewidth=0.5)
-
-            # Per-bot regression line
-            bot_x = plot_data[mask][action].values
-            bot_y = plot_data[mask]['WinRate'].values
-            if len(bot_x) > 1 and bot_x.std() > 0:  # Need at least 2 points and variance for regression
-                bot_slope, bot_intercept = np.polyfit(bot_x, bot_y, 1)
-                bot_x_line = np.linspace(bot_x.min(), bot_x.max(), 100)
-                bot_y_line = bot_slope * bot_x_line + bot_intercept
-                axes[idx].plot(bot_x_line, bot_y_line, '--', linewidth=1.5, color=color, alpha=0.7)
-
-        # Overall regression line
-        overall_x = plot_data[action].values
-        overall_y = plot_data['WinRate'].values
-        if len(overall_x) > 1 and overall_x.std() > 0:  # Need at least 2 points and variance for regression
-            slope, intercept = np.polyfit(overall_x, overall_y, 1)
-            x_line = np.linspace(overall_x.min(), overall_x.max(), 100)
-            y_line = slope * x_line + intercept
-            axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5)
-
-        # Correlation info
-        corr_text = f'r={pearson_r:.3f}\np={pearson_p:.2e}'
-        axes[idx].text(0.05, 0.95, corr_text, transform=axes[idx].transAxes,
-                      verticalalignment='top', bbox=dict(boxstyle='round',
-                      facecolor='wheat', alpha=0.8), fontsize=8, family='monospace')
-
-        axes[idx].set_xlabel(get_metric_name(action), fontsize=10)
-        axes[idx].set_ylabel(get_metric_name('WinRate'), fontsize=10)
-        axes[idx].set_title(f'{get_metric_name("WinRate")} vs {get_metric_name(action)}', fontsize=11, fontweight='bold')
-        axes[idx].grid(True, alpha=0.3, linestyle='--')
-
-        # Set y-axis limits to valid range [0, 1] for WinRate (crop frame instead of clipping line)
-        axes[idx].set_ylim(0, 1)
-
-    # Add legend below x-axis with rank title if rankings are available
-    handles, labels = [], []
-    for ax in fig.axes:
-        h, l = ax.get_legend_handles_labels()
-        handles.extend(h)
-        labels.extend(l)
-
-    # Deduplicate while preserving order
-    unique = dict(zip(labels, handles))
-    legend_title = 'Bot (Rank)' if rank_map else 'Bot'
-    fig.legend(unique.values(), unique.keys(),
-           title=legend_title, fontsize=6,
-           loc='upper center',
-           bbox_to_anchor=(0.5, -0.05),
-           framealpha=0.7, ncol=3)
-
-    plt.suptitle('Win Rate vs Individual Action Types\n(All Bots Combined)',
-                 fontsize=14, fontweight='bold', y=0.995)
-    plt.tight_layout()
-    figs['actions'] = fig
-
-    # e. Winrate vs Individual Actions
-    action_types = ['Accelerate_Dur', 'TurnLeft_Dur', 'TurnRight_Dur', 'Dash_Dur']
-
-    # Get bot rankings if available (reuse from above if already set)
-    if 'rank_map' not in locals():
-        rank_map = {}
-        if 'Rank_L' in data.columns:
-            rank_map = data.groupby('Bot')['Rank_L'].first().to_dict()
-
-    fig, axes = plt.subplots(2, 2, figsize=(width*1.2, height*1.5))
-    axes = axes.flatten()
-
-    for idx, action in enumerate(action_types):
-        if action not in data.columns:
-            continue
-
-        plot_data = data[[action, 'WinRate', 'Bot']].dropna()
-
-        if len(plot_data) == 0:
-            axes[idx].text(0.5, 0.5, f'No data for {action}',
-                          ha='center', va='center', transform=axes[idx].transAxes)
-            continue
-
-        # Calculate Pearson correlation
-        pearson_r, pearson_p = stats.pearsonr(plot_data[action], plot_data['WinRate'])
-
-        # Scatter plot - sort bots by rank
-        unique_bots = plot_data['Bot'].unique()
-        if rank_map:
-            # Sort bots by rank
-            unique_bots = sorted(unique_bots, key=lambda b: rank_map.get(b, 999))
-
-        for bot in unique_bots:
-            mask = plot_data['Bot'] == bot
-            marker = get_bot_marker(bot)
-            color = get_bot_color(bot)
-
-            # Create label with rank if available
-            if rank_map and bot in rank_map:
-                label = f"{bot} (#{int(rank_map[bot])})"
-            else:
-                label = bot
-
-            axes[idx].scatter(plot_data[mask][action], plot_data[mask]['WinRate'],
-                            label=label, alpha=alpha, s=30, color=color,
-                            marker=marker, edgecolors='black', linewidth=0.5)
-
-            # Per-bot regression line
-            bot_x = plot_data[mask][action].values
-            bot_y = plot_data[mask]['WinRate'].values
-            if len(bot_x) > 1 and bot_x.std() > 0:  # Need at least 2 points and variance for regression
-                bot_slope, bot_intercept = np.polyfit(bot_x, bot_y, 1)
-                bot_x_line = np.linspace(bot_x.min(), bot_x.max(), 100)
-                bot_y_line = bot_slope * bot_x_line + bot_intercept
-                axes[idx].plot(bot_x_line, bot_y_line, '--', linewidth=1.5, color=color, alpha=0.7)
-
-        # Overall regression line
-        overall_x = plot_data[action].values
-        overall_y = plot_data['WinRate'].values
-        if len(overall_x) > 1 and overall_x.std() > 0:  # Need at least 2 points and variance for regression
-            slope, intercept = np.polyfit(overall_x, overall_y, 1)
-            x_line = np.linspace(overall_x.min(), overall_x.max(), 100)
-            y_line = slope * x_line + intercept
-            axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5)
-
-        # Correlation info
-        corr_text = f'r={pearson_r:.3f}\np={pearson_p:.2e}'
-        axes[idx].text(0.05, 0.95, corr_text, transform=axes[idx].transAxes,
-                      verticalalignment='top', bbox=dict(boxstyle='round',
-                      facecolor='wheat', alpha=0.8), fontsize=8, family='monospace')
-
-        axes[idx].set_xlabel(get_metric_name(action), fontsize=10)
-        axes[idx].set_ylabel(get_metric_name('WinRate'), fontsize=10)
-        axes[idx].set_title(f'{get_metric_name("WinRate")} vs {get_metric_name(action)}', fontsize=11, fontweight='bold')
-        axes[idx].grid(True, alpha=0.3, linestyle='--')
-
-        # Set y-axis limits to valid range [0, 1] for WinRate (crop frame instead of clipping line)
-        axes[idx].set_ylim(0, 1)
-
-    # Add legend below x-axis with rank title if rankings are available
-    handles, labels = [], []
-    for ax in fig.axes:
-        h, l = ax.get_legend_handles_labels()
-        handles.extend(h)
-        labels.extend(l)
-
-    # Deduplicate while preserving order
-    unique = dict(zip(labels, handles))
-    legend_title = 'Bot (Rank)' if rank_map else 'Bot'
-    fig.legend(unique.values(), unique.keys(),
-           title=legend_title, fontsize=6,
-           loc='upper center',
-           bbox_to_anchor=(0.5, -0.05),
-           framealpha=0.7, ncol=3)
-
-    plt.suptitle('Win Rate vs Individual Action Duration\n(All Bots Combined)',
-                 fontsize=14, fontweight='bold', y=0.995)
-    plt.tight_layout()
-    figs['actions_dur'] = fig
-
-    # f. Winrate vs Collision Types (Hit, Struck, Tie) - Combined across all configs
-    collision_types = ['Collisions_L', 'Collisions_R', 'Collisions_Tie']
-    collision_labels = {'Collisions_L': 'Hit', 'Collisions_R': 'Struck', 'Collisions_Tie': 'Tie'}
-
-    # Get bot rankings if available
-    rank_map = {}
-    if 'Rank_L' in data.columns:
-        rank_map = data.groupby('Bot')['Rank_L'].first().to_dict()
-
-    fig, axes = plt.subplots(1, 3, figsize=(width*1.8, height))
-
-    for idx, col_type in enumerate(collision_types):
-        if col_type not in data.columns:
-            continue
-
-        plot_data = data[[col_type, 'WinRate', 'Bot']].dropna()
-
-        if len(plot_data) < 2:
-            axes[idx].text(0.5, 0.5, f'Insufficient data',
-                          ha='center', va='center', transform=axes[idx].transAxes)
-            continue
-
-        # Calculate Pearson correlation
-        pearson_r, pearson_p = stats.pearsonr(plot_data[col_type], plot_data['WinRate'])
-
-        # Get unique bots and assign colors - sort by rank
-        unique_bots = plot_data['Bot'].unique()
-        if rank_map:
-            # Sort bots by rank
-            unique_bots = sorted(unique_bots, key=lambda b: rank_map.get(b, 999))
-        else:
-            unique_bots = sorted(unique_bots)
-
-        # Scatter plot colored by bot
-        for bot in unique_bots:
-            bot_data = plot_data[plot_data['Bot'] == bot]
-            marker = get_bot_marker(bot)
-            color = get_bot_color(bot)
-
-            # Create label with rank if available
-            if rank_map and bot in rank_map:
-                label = f"{bot} (#{int(rank_map[bot])})"
-            else:
-                label = bot
-
-            axes[idx].scatter(bot_data[col_type], bot_data['WinRate'],
-                            alpha=alpha, s=60, color=color, marker=marker,
-                            label=label, edgecolors='black', linewidth=0.5)
-
-        # Overall regression line
-        if len(plot_data) >= 2 and plot_data[col_type].std() > 0:
-            slope, intercept = np.polyfit(plot_data[col_type], plot_data['WinRate'], 1)
-            x_line = np.linspace(plot_data[col_type].min(), plot_data[col_type].max(), 100)
-            y_line = slope * x_line + intercept
-            axes[idx].plot(x_line, y_line, '-', color=get_theme_color('regression_line'), linewidth=2.5, label='Overall Regression')
-
-        # Correlation info
-        corr_text = f'r={pearson_r:.3f}\np={pearson_p:.2e}'
-        axes[idx].text(0.05, 0.95, corr_text, transform=axes[idx].transAxes,
-                      verticalalignment='top', bbox=dict(boxstyle='round',
-                      facecolor='wheat', alpha=0.8), fontsize=10, family='monospace')
-
-        axes[idx].set_xlabel(collision_labels[col_type], fontsize=11, fontweight='bold')
-        axes[idx].set_ylabel(get_metric_name('WinRate'), fontsize=11, fontweight='bold')
-        axes[idx].set_title(f'{get_metric_name("WinRate")} vs {collision_labels[col_type]}',
-                           fontsize=12, fontweight='bold')
-        axes[idx].grid(True, alpha=0.3, linestyle='--')
-
-        # Set y-axis limits to valid range [0, 1] for WinRate (crop frame instead of clipping line)
-        axes[idx].set_ylim(0, 1)
-
-    # Add legend below x-axis with rank title if rankings are available
-    handles, labels = [], []
-    for ax in fig.axes:
-        h, l = ax.get_legend_handles_labels()
-        handles.extend(h)
-        labels.extend(l)
-
-    # Deduplicate while preserving order
-    unique = dict(zip(labels, handles))
-    legend_title = 'Bot (Rank)' if rank_map else 'Bot'
-    fig.legend(unique.values(), unique.keys(),
-           title=legend_title, fontsize=6,
-           loc='upper center',
-           bbox_to_anchor=(0.5, -0.05),
-           framealpha=0.7, ncol=3)
-
-
-    plt.suptitle(f'Win Rate vs Collision Types\n(All Bots Combined)',
-                 fontsize=14, fontweight='bold', y=1.00)
-    plt.tight_layout()
-    figs['collisions'] = fig
+    collision_labels = {'Collisions_L': 'Hit', 'Collisions_R': 'Struck',
+                        'Collisions_Tie': 'Tie'}
+    fig = plot_winrate_correlation_panels(
+        data, list(collision_labels), title='Win Rate vs Collision Types (All Bots Combined)',
+        rank_map=rank_map, ncols=3, per_bot_regression=False, alpha=alpha,
+        x_labels=collision_labels)
+    if fig:
+        figs['collisions'] = fig
 
     return figs
 
