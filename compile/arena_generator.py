@@ -40,6 +40,17 @@ with open(_config_path, 'r') as f:
 
 arena_center = np.array(_config['arena']['center'])
 arena_radius = _config['arena']['radius']
+
+
+def set_arena_center(center):
+    """
+    Override config.json's arena center for this process. Datasets can be recorded
+    in different coordinates (e.g. competition data is already centered on the
+    origin), so the two analysis notebooks can't share one fixed value. Every chart
+    in this module reads arena_center at call time, so this applies to all of them.
+    """
+    global arena_center
+    arena_center = np.asarray(center, dtype=float)
 tile_size = _config['visualization']['tile_size']
 # arrow_size = 50   # Larger = longer arrows
 
@@ -2192,7 +2203,7 @@ def create_distance_distributions_all_matchups(base_dir, output_dir="arena_heatm
     print(f"✅ Completed! Distance distribution plots saved in bot folders")
     print("=" * 60)
 
-def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all", cache_dir=None, use_cache_if_exists=False):
+def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_position="both", chunksize=50000, max_configs=None, mode="all", use_timer=False, use_time_windows=False, include_distance_over_time=True, skip_initial=0.0, input_format="auto", filter_bots=None, filter_matchups=None, bot_scope="all", cache_dir=None, use_cache_if_exists=False, arena_center_override=None):
     """
     Create heatmaps and position distribution plots for all bots in the simulation directory
     Saves individual phase/timer images for each bot, plus a pooled "All_Bots_Combined"
@@ -2221,6 +2232,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
             set, every chart also writes its cache CSV alongside the PNG. Once populated,
             pass this directory to render_charts_from_cache() to redraw all charts (e.g.
             after tweaking titles/labels/colors) without rescanning the simulation data.
+        arena_center_override: Optional (x, y) replacing config.json's arena center for this
+            dataset, e.g. (0, 0) for data already centered on the origin. Cached positions
+            are stored raw, so heatmaps pick this up from cache; distance_distribution
+            caches store computed distances and must be regenerated.
         use_cache_if_exists: If True and cache_dir already has a chart's CSV, skip the
             expensive load/compute for that chart and render straight from the cached CSV
             instead - so calling this function again with the same cache_dir is fast rather
@@ -2232,6 +2247,10 @@ def create_phased_heatmaps_all_bots(base_dir, output_dir="arena_heatmap", actor_
     """
     if bot_scope not in ("all", "aggregate_only", "per_bot_only"):
         raise ValueError(f"bot_scope must be 'all', 'aggregate_only', or 'per_bot_only', got {bot_scope!r}")
+
+    if arena_center_override is not None:
+        set_arena_center(arena_center_override)
+    print(f"Arena center: ({arena_center[0]}, {arena_center[1]})")
 
     # Find all unique bot names from matchup folders
     matchup_folders = [f for f in os.listdir(base_dir)
@@ -2971,7 +2990,7 @@ def _render_single_cached_chart(cache_path, name, output_path, actor_position="b
     return True
 
 
-def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filter_bots=None):
+def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filter_bots=None, arena_center_override=None):
     """
     Regenerate chart PNGs from the CSVs written by
     create_phased_heatmaps_all_bots(cache_dir=...), without touching the raw simulation
@@ -2985,9 +3004,14 @@ def render_charts_from_cache(cache_dir, output_dir, actor_position="both", filte
         filter_bots: Optional list of cache subfolder names to restrict to (e.g. ["Bot_BT"]).
             Subfolder names include "All_Bots_Combined" for the pooled aggregate.
 
+        arena_center_override: Optional (x, y) replacing config.json's arena center.
+
     Returns:
         Number of charts regenerated.
     """
+    if arena_center_override is not None:
+        set_arena_center(arena_center_override)
+
     if not os.path.isdir(cache_dir):
         print(f"Cache directory not found: {cache_dir}")
         return 0
