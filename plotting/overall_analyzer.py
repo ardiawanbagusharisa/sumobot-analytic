@@ -2754,14 +2754,18 @@ def _mean_ci95(values):
 
 
 def _plot_bot_mean_ci(ax, plot_data, x_col, y_col, color_by, unique_values,
-                      rank_map, dodge_frac=0.3):
+                      rank_map, error='sd', dodge_frac=0.0):
     """
-    Draw each bot's mean +/- 95% CI at every discrete x value, dodged
-    horizontally so bots never overlap, and connect each bot's means.
+    Draw each bot's mean +/- error at every discrete x value and connect each
+    bot's means.
 
+    error: 'sd' (1 standard deviation) or 'ci95' (t-based 95% CI of the mean).
     dodge_frac: fraction of the smallest gap between x values that the whole
-                group of bots spreads across.
+                group of bots spreads across. 0 stacks every bot vertically
+                on the x tick.
     """
+    if error not in ('sd', 'ci95'):
+        raise ValueError("error must be 'sd' or 'ci95'")
     x_levels = np.sort(plot_data[x_col].unique())
     min_gap = np.diff(x_levels).min() if len(x_levels) > 1 else 1.0
     n_groups = len(unique_values)
@@ -2786,7 +2790,11 @@ def _plot_bot_mean_ci(ax, plot_data, x_col, y_col, color_by, unique_values,
             y = sub.loc[sub[x_col] == x, y_col].values
             if len(y) == 0:
                 continue
-            m, ci = _mean_ci95(y)
+            if error == 'sd':
+                m = y.mean()
+                ci = y.std(ddof=1) if len(y) > 1 else 0.0
+            else:
+                m, ci = _mean_ci95(y)
             xs.append(x + offsets[idx])
             means.append(m)
             cis.append(ci)
@@ -2806,7 +2814,7 @@ def _plot_bot_mean_ci(ax, plot_data, x_col, y_col, color_by, unique_values,
 
 def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
                             alpha=0.95, figsize=(10, 8), add_per_bot_regression=False,
-                            style='scatter'):
+                            style='scatter', error='sd', dodge_frac=0.0):
     """
     Create scatter plot with regression line and Pearson correlation.
 
@@ -2821,9 +2829,12 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
         add_per_bot_regression: If True, add regression line for each bot
                                 (scatter style only)
         style: 'scatter' plots every raw point.
-               'mean_ci' plots each bot's mean +/- 95% CI per x value, dodged
-               so bots don't overlap; meant for discrete x (config values).
+               'mean_ci' plots each bot's mean +/- error per x value; meant
+               for discrete x (config values).
                Pearson r and the overall regression always use the raw data.
+        error: 'mean_ci' only. 'sd' (1 standard deviation) or 'ci95'.
+        dodge_frac: 'mean_ci' only. 0 stacks all bots on the x tick; e.g. 0.3
+                    spreads them sideways so they don't overlap.
 
     Returns:
         matplotlib figure
@@ -2862,7 +2873,8 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
 
     if style == 'mean_ci' and color_by in plot_data.columns:
         _plot_bot_mean_ci(ax, plot_data, x_col, y_col, color_by,
-                          unique_values, rank_map)
+                          unique_values, rank_map, error=error,
+                          dodge_frac=dodge_frac)
     elif color_by in plot_data.columns:
         for idx, value in enumerate(unique_values):
             mask = plot_data[color_by] == value
@@ -2908,8 +2920,9 @@ def plot_correlation_scatter(data, x_col, y_col, title, color_by='Bot',
 
     if style == 'mean_ci':
         # One line between title and axes, so it never covers the data.
+        err_label = '1 SD' if error == 'sd' else '95% CI'
         corr_text = (f'Pearson r = {pearson_r:.3f},  p = {pearson_p:.3g},  '
-                     f'n = {len(plot_data)}   (points: mean \u00b1 95% CI)')
+                     f'n = {len(plot_data)}   (points: mean \u00b1 {err_label})')
         ax.text(0.5, 1.015, corr_text, transform=ax.transAxes,
                 ha='center', va='bottom', fontsize=11)
         ax.set_title(title, fontsize=14, fontweight='bold', pad=26)
@@ -3066,7 +3079,8 @@ def plot_winrate_correlation_panels(data, x_cols, title, rank_map=None, ncols=3,
     return fig
 
 
-def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
+def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci',
+                          error='sd', dodge_frac=0.0):
     """
     Create all correlation plots for win rate analysis.
     For config variables, creates separate plots for each config value.
@@ -3076,7 +3090,9 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
         width: Figure width
         height: Figure height
         style: Style for the config charts (ActInterval, Round, Timer, Skill):
-               'mean_ci' (per-bot mean +/- 95% CI) or 'scatter' (raw points)
+               'mean_ci' (per-bot mean +/- error) or 'scatter' (raw points)
+        error: 'sd' (1 standard deviation, default) or 'ci95' for 'mean_ci'
+        dodge_frac: 0 (default) stacks all bots on the x tick; >0 spreads them
 
     Returns:
         Dictionary of figures with nested structure for config-separated plots
@@ -3093,7 +3109,8 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
         y_col='WinRate',
         title='Win Rate vs Action Interval\n(All Bots Combined)',
         figsize=(width, height),
-        add_per_bot_regression=True,alpha=alpha, style=style
+        add_per_bot_regression=True,alpha=alpha, style=style,
+        error=error, dodge_frac=dodge_frac
     )
     if fig:
         figs['actinterval'] = fig
@@ -3111,7 +3128,8 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
         y_col='WinRate',
         title=round_title,
         figsize=(width, height),
-        add_per_bot_regression=True,alpha=alpha, style=style
+        add_per_bot_regression=True,alpha=alpha, style=style,
+        error=error, dodge_frac=dodge_frac
     )
     if fig:
         figs['roundtype'] = fig
@@ -3123,7 +3141,8 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
         y_col='WinRate',
         title='Win Rate vs Timer Duration\n(All Bots Combined)',
         figsize=(width, height),
-        add_per_bot_regression=True,alpha=alpha, style=style
+        add_per_bot_regression=True,alpha=alpha, style=style,
+        error=error, dodge_frac=dodge_frac
     )
     if fig:
         figs['timer'] = fig
@@ -3139,7 +3158,8 @@ def plot_all_correlations(df, width=10, height=8,alpha=0.2, style='mean_ci'):
             y_col='WinRate',
             title='Win Rate vs Skill Type (1=Stone, 2=Boost)\n(All Bots Combined)',
             figsize=(width, height),
-            add_per_bot_regression=True,alpha=alpha, style=style
+            add_per_bot_regression=True,alpha=alpha, style=style,
+            error=error, dodge_frac=dodge_frac
         )
         if fig:
             figs['skilltype'] = fig
