@@ -42,6 +42,7 @@ Required packages:
 - `python-dotenv` - Environment variable management
 - `streamlit` - Web dashboard (optional)
 - `streamlit_modal` - Modal dialogs for Streamlit (optional)
+- `huggingface_hub` - Download existing simulation data from Hugging Face (optional)
 
 ## Quick Start
 
@@ -166,6 +167,37 @@ convert_all_configs(simulation_root, converted_dir)
 ```
 
 This processes all configuration folders and generates Parquet/CSV files organized by matchup.
+
+#### Step 2.1 (Alternative): Use Existing Simulation Data from Hugging Face
+
+Don't have your own match logs, or want to analyze the reference simulation? Pull the pre-converted dataset from [`ardiawanbagus/sumobot-simulation-data`](https://huggingface.co/datasets/ardiawanbagus/sumobot-simulation-data) instead. The files are already Parquet in the same layout as the output of Step 2.1, so **skip the conversion** and continue from Step 2.2 using the returned path as `converted_dir`.
+
+```python
+from compile.hf_dataset import pull_simulation_dataset
+
+# Full dataset (13 agents, ~20GB)
+converted_dir = pull_simulation_dataset()
+
+# Or only download what you need
+converted_dir = pull_simulation_dataset(
+    bots=["Bot_NN", "Bot_MCTS"],          # matchups where these bots play (left or right)
+    # matchups=["Bot_NN_vs_Bot_MCTS"],    # exact matchup folders
+    timers=[60],                          # only Timer_60 configs
+)
+```
+
+Or from the command line:
+
+```bash
+python3 -m compile.hf_dataset                                   # full dataset
+python3 -m compile.hf_dataset --bots Bot_NN Bot_MCTS --timers 60
+```
+
+Notes:
+- Files go to `.analytic-cache/converted/hf/simulated-13agents` by default (change with `output_dir=` / `--output-dir`). That folder is git-ignored.
+- Re-running only downloads files that are missing, so it's safe to call again or to widen the filters later.
+- `bots` and `matchups` are combined (union). `timers` narrows both.
+- The dataset is public, so no login is needed. Optionally set `HF_TOKEN` (or run `huggingface-cli login`) for higher rate limits when pulling the full dataset.
 
 #### Step 2.2: Generate Summarization CSV
 
@@ -348,6 +380,7 @@ sumobot-analytic/
 ├── compile/                    # Data processing modules
 │   ├── log_to_parquet.py      # Convert simulation logs to Parquet (recommended)
 │   ├── log_to_csv.py          # Convert simulation logs to CSV
+│   ├── hf_dataset.py          # Pull pre-converted simulation data from Hugging Face
 │   ├── generator.py           # Generate summary statistics
 │   └── arena_generator.py     # Create spatial heatmaps
 ├── plotting/                   # Visualization modules
